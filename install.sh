@@ -159,6 +159,8 @@ pveam update >/dev/null 2>&1 || true
 # try to find the latest available template for the chosen family
 # Try to find the latest available template for the chosen family in a safe, stepwise way.
 TEMPLATE_FILE=""
+# Default to a known-good Alpine template file if not overridden
+TEMPLATE_FILE_OVERRIDE=${TEMPLATE_FILE_OVERRIDE:-'alpine-3.23-default_20260116_amd64.tar.xz'}
 # Allow explicit override of the exact template filename (safer for reproducible runs)
 if [ -n "${TEMPLATE_FILE_OVERRIDE:-}" ]; then
   TEMPLATE_FILE="$TEMPLATE_FILE_OVERRIDE"
