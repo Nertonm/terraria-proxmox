@@ -226,6 +226,25 @@ create_with_storage() {
   fi
 }
 
+echo "Checking cluster quorum and storage availability..."
+# If the Proxmox cluster is not ready or has no quorum, prefer local storage
+if command -v pvecm >/dev/null 2>&1; then
+  if ! pvecm status >/dev/null 2>&1 || pvecm status 2>/dev/null | grep -Eiq 'no quorum|quorum: no'; then
+    echo "Warning: Proxmox cluster not ready or no quorum detected; preferring local storage." >&2
+    if command -v pvesm >/dev/null 2>&1; then
+      if pvesm status | awk 'NR>1{print $1}' | grep -qw local; then
+        STORAGE="local"
+      else
+        candidate=$(pvesm status 2>/dev/null | awk 'NR>1{print $1}' | head -n1 || true)
+        if [ -n "$candidate" ]; then
+          STORAGE="$candidate"
+        fi
+      fi
+    fi
+    echo "Using storage: $STORAGE"
+  fi
+fi
+
 echo "Creating container (preferred storage: $STORAGE)..."
 if create_with_storage "$STORAGE"; then
   echo "Container created on storage '$STORAGE'."
