@@ -4,6 +4,11 @@
 set -euo pipefail
 trap 'echo "Error on line $LINENO" >&2; exit 1' ERR
 
+# Provide a safe locale fallback to reduce warnings from tools (perl, etc.).
+# Users may still want to generate proper locales on the host.
+export LC_ALL=${LC_ALL:-C}
+export LANG=${LANG:-C}
+
 # Usage/help
 usage() {
   cat <<USAGE
@@ -149,18 +154,46 @@ fi
 pveam update >/dev/null 2>&1 || true
 
 # try to find the latest available template for the chosen family
-# Try to find the latest available template for the chosen family.
-# Be tolerant: `pveam available` may fail or return nothing, so handle empty results
+# Try to find the latest available template for the chosen family in a safe, stepwise way.
 TEMPLATE_FILE=""
-if available_out=$(pveam available 2>/dev/null || true); then
-  TEMPLATE_FILE=$(printf "%s" "$available_out" | grep -Eo "${TEMPLATE_FAMILY}_[^ ]+" | sort -V | tail -n1 || true)
+# Allow explicit override of the exact template filename (safer for reproducible runs)
+if [ -n "${TEMPLATE_FILE_OVERRIDE:-}" ]; then
+  TEMPLATE_FILE="$TEMPLATE_FILE_OVERRIDE"
+else
+  available_out=$(pveam available 2>/dev/null || true)
+  # If the family looks like an exact template name (contains '_' or '/'),
+  # prefer exact (fixed-string) match; otherwise do a case-insensitive substring match.
+  if printf "%s" "$TEMPLATE_FAMILY" | grep -qF "_" || printf "%s" "$TEMPLATE_FAMILY" | grep -qF "/"; then
+    cand_lines=$(printf "%s" "$available_out" | grep -F "$TEMPLATE_FAMILY" || true)
+  else
+    cand_lines=$(printf "%s" "$available_out" | grep -i "$TEMPLATE_FAMILY" || true)
+  fi
+
+  # Extract the first token from each matched line (the template file name)
+  if [ -n "$cand_lines" ]; then
+    matches=$(printf "%s" "$cand_lines" | awk '{print $1}' || true)
+    if [ -n "$matches" ]; then
+      TEMPLATE_FILE=$(printf "%s\n" "$matches" | sort -V | tail -n1)
+    fi
+  fi
 fi
 
 TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE_FILE"
 if [ -z "$TEMPLATE_FILE" ]; then
   echo "No template found for '${TEMPLATE_FAMILY}' from pveam; refreshing index and retrying..." >&2
   pveam update >/dev/null 2>&1 || true
-  TEMPLATE_FILE=$(pveam available 2>/dev/null | grep -Eo "${TEMPLATE_FAMILY}_[^ ]+" | sort -V | tail -n1 || true)
+  available_out=$(pveam available 2>/dev/null || true)
+  if printf "%s" "$TEMPLATE_FAMILY" | grep -qF "_" || printf "%s" "$TEMPLATE_FAMILY" | grep -qF "/"; then
+    cand_lines=$(printf "%s" "$available_out" | grep -F "$TEMPLATE_FAMILY" || true)
+  else
+    cand_lines=$(printf "%s" "$available_out" | grep -i "$TEMPLATE_FAMILY" || true)
+  fi
+  if [ -n "$cand_lines" ]; then
+    matches=$(printf "%s" "$cand_lines" | awk '{print $1}' || true)
+    if [ -n "$matches" ]; then
+      TEMPLATE_FILE=$(printf "%s\n" "$matches" | sort -V | tail -n1)
+    fi
+  fi
 fi
 
 if [ -z "$TEMPLATE_FILE" ]; then
