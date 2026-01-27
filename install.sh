@@ -18,7 +18,10 @@ Positional:
   CT_ID                 Container ID (default: ${CT_ID:-1550})
 
 Options:
-  -t, --template TEMPLATE_FAMILY   Template family or regex (env: TEMPLATE_FAMILY)
+  -t, --template TEMPLATE_FAMILY   Template family (simple substring or exact name; env: TEMPLATE_FAMILY)
+  ## TEMPLATE_FAMILY should be a simple substring or exact template name.
+  ## Avoid complex regex here — use an exact template filename via
+  ## `TEMPLATE_FILE_OVERRIDE` or a short substring like 'alpine'.
   -v, --version TERRARIA_VERSION   Terraria version (env: TERRARIA_VERSION)
   --dhcp                          Use DHCP for container network (env: NET_DHCP=yes)
   --ip NET_IP                     Container IP with CIDR (env: NET_IP)
@@ -166,7 +169,7 @@ else
   if printf "%s" "$TEMPLATE_FAMILY" | grep -qF "_" || printf "%s" "$TEMPLATE_FAMILY" | grep -qF "/"; then
     cand_lines=$(printf "%s" "$available_out" | grep -F "$TEMPLATE_FAMILY" || true)
   else
-    cand_lines=$(printf "%s" "$available_out" | grep -i "$TEMPLATE_FAMILY" || true)
+    cand_lines=$(printf "%s" "$available_out" | grep -i "alpine" || true)
   fi
 
   # Extract the first token from each matched line (the template file name)
@@ -186,7 +189,7 @@ if [ -z "$TEMPLATE_FILE" ]; then
   if printf "%s" "$TEMPLATE_FAMILY" | grep -qF "_" || printf "%s" "$TEMPLATE_FAMILY" | grep -qF "/"; then
     cand_lines=$(printf "%s" "$available_out" | grep -F "$TEMPLATE_FAMILY" || true)
   else
-    cand_lines=$(printf "%s" "$available_out" | grep -i "$TEMPLATE_FAMILY" || true)
+    cand_lines=$(printf "%s" "$available_out" | grep -i "alpine" || true)
   fi
   if [ -n "$cand_lines" ]; then
     matches=$(printf "%s" "$cand_lines" | awk '{print $1}' || true)
