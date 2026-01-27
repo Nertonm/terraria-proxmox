@@ -211,13 +211,50 @@ if [ ! -f "$TEMPLATE_PATH" ]; then
   pveam update && pveam download local "$TEMPLATE_FILE"
 fi
 
-# 2. Create the Container
-pct create $CT_ID $TEMPLATE_PATH \
-  --arch amd64 --hostname $CT_NAME \
-  --cores $CORES --memory $MEMORY --swap 512 \
-  --storage $STORAGE --rootfs $DISK \
-  --net0 $NET0_OPTS \
-  --unprivileged 1 --onboot 1
+# 2. Create the Container (with storage fallback for single-node / quorum errors)
+create_with_storage() {
+  storage="$1"
+  if pct create "$CT_ID" "$TEMPLATE_PATH" \
+    --arch amd64 --hostname "$CT_NAME" \
+    --cores "$CORES" --memory "$MEMORY" --swap 512 \
+    --storage "$storage" --rootfs "$DISK" \
+    --net0 "$NET0_OPTS" \
+    --unprivileged 1 --onboot 1; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+echo "Creating container (preferred storage: $STORAGE)..."
+if create_with_storage "$STORAGE"; then
+  echo "Container created on storage '$STORAGE'."
+else
+  echo "Initial pct create failed with storage '$STORAGE'. Trying fallback storage..." >&2
+  # Prefer 'local' if present, else pick first storage reported by pvesm
+  fallback=""
+  if command -v pvesm >/dev/null 2>&1; then
+    if pvesm status | awk 'NR>1{print $1}' | grep -qw local; then
+      fallback="local"
+    else
+      fallback=$(pvesm status 2>/dev/null | awk 'NR>1{print $1}' | head -n1 || true)
+    fi
+  fi
+
+  if [ -n "$fallback" ] && [ "$fallback" != "$STORAGE" ]; then
+    echo "Attempting create on fallback storage: $fallback"
+    if create_with_storage "$fallback"; then
+      STORAGE="$fallback"
+      echo "Container created on fallback storage '$STORAGE'."
+    else
+      echo "Fallback create failed on storage '$fallback'. Aborting." >&2
+      exit 1
+    fi
+  else
+    echo "No suitable fallback storage found or fallback equals configured storage. Aborting." >&2
+    exit 1
+  fi
+fi
 
 pct start $CT_ID
 echo "Waiting for network initialization..."
