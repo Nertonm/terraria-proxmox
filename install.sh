@@ -149,9 +149,25 @@ fi
 pveam update >/dev/null 2>&1 || true
 
 # try to find the latest available template for the chosen family
-TEMPLATE_FILE=$(pveam available | grep -Eo "${TEMPLATE_FAMILY}_[^ ]+" | sort -V | tail -n1)
+# Try to find the latest available template for the chosen family.
+# Be tolerant: `pveam available` may fail or return nothing, so handle empty results
+TEMPLATE_FILE=""
+if available_out=$(pveam available 2>/dev/null || true); then
+  TEMPLATE_FILE=$(printf "%s" "$available_out" | grep -Eo "${TEMPLATE_FAMILY}_[^ ]+" | sort -V | tail -n1 || true)
+fi
 
 TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE_FILE"
+if [ -z "$TEMPLATE_FILE" ]; then
+  echo "No template found for '${TEMPLATE_FAMILY}' from pveam; refreshing index and retrying..." >&2
+  pveam update >/dev/null 2>&1 || true
+  TEMPLATE_FILE=$(pveam available 2>/dev/null | grep -Eo "${TEMPLATE_FAMILY}_[^ ]+" | sort -V | tail -n1 || true)
+fi
+
+if [ -z "$TEMPLATE_FILE" ]; then
+  echo "Error: could not find any template matching '${TEMPLATE_FAMILY}'. Aborting." >&2
+  exit 1
+fi
+
 if [ ! -f "$TEMPLATE_PATH" ]; then
   echo "Downloading template $TEMPLATE_FILE..."
   pveam update && pveam download local "$TEMPLATE_FILE"
