@@ -3,6 +3,7 @@
 
 set -euo pipefail
 trap 'echo "Error on line $LINENO" >&2; exit 1' ERR
+STORAGE=${STORAGE:-"local-lvm"}
 
 # Provide a safe locale fallback to reduce warnings from tools (perl, etc.).
 # Users may still want to generate proper locales on the host.
