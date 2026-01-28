@@ -246,9 +246,36 @@ if command -v pvecm >/dev/null 2>&1; then
 fi
 
 echo "Creating container (preferred storage: $STORAGE)..."
-if create_with_storage "$STORAGE"; then
+try_create_with_retries() {
+  target_storage="$1"
+  max_attempts=${2:-5}
+  attempt=1
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if create_with_storage "$target_storage"; then
+      return 0
+    fi
+
+    # if cluster reports no quorum, wait and retry; otherwise stop retrying
+    if command -v pvecm >/dev/null 2>&1 && pvecm status 2>/dev/null | grep -Eiq 'no quorum|quorum: no'; then
+      echo "Detected cluster no-quorum state; retrying create (attempt $attempt/$max_attempts)..." >&2
+      sleep $((attempt * 5))
+      attempt=$((attempt + 1))
+      continue
+    else
+      # non-quorum error (immediate failure)
+      return 1
+    fi
+  done
+  return 1
+}
+
+created=0
+if try_create_with_retries "$STORAGE" 5; then
   echo "Container created on storage '$STORAGE'."
-else
+  created=1
+fi
+
+if [ "$created" -ne 1 ]; then
   echo "Initial pct create failed with storage '$STORAGE'. Trying fallback storage..." >&2
   # Prefer 'local' if present, else pick first storage reported by pvesm
   fallback=""
@@ -262,16 +289,24 @@ else
 
   if [ -n "$fallback" ] && [ "$fallback" != "$STORAGE" ]; then
     echo "Attempting create on fallback storage: $fallback"
-    if create_with_storage "$fallback"; then
+    if try_create_with_retries "$fallback" 5; then
       STORAGE="$fallback"
       echo "Container created on fallback storage '$STORAGE'."
+      created=1
     else
       echo "Fallback create failed on storage '$fallback'. Aborting." >&2
       exit 1
     fi
   else
-    echo "No suitable fallback storage found or fallback equals configured storage. Aborting." >&2
-    exit 1
+    # If there's no different fallback, try retrying the original storage a few more times
+    echo "No different fallback storage found; retrying original storage a couple more times..." >&2
+    if try_create_with_retries "$STORAGE" 3; then
+      echo "Container created on storage '$STORAGE' after additional retries.";
+      created=1
+    else
+      echo "No suitable fallback storage found and retries exhausted. Aborting." >&2
+      exit 1
+    fi
   fi
 fi
 
