@@ -1,405 +1,565 @@
 #!/bin/bash
-# Deploy Container LXC Terraria Proxmox VE.
+# Deploy Container LXC Terraria Proxmox VE
+# Refactored for resilience, idempotency, MULTI-DISTRO compatibility, and usability.
 
 set -euo pipefail
 trap 'echo "Error on line $LINENO" >&2; exit 1' ERR
-STORAGE=${STORAGE:-"local-lvm"}
 
-# Provide a safe locale fallback to reduce warnings from tools (perl, etc.).
-# Users may still want to generate proper locales on the host.
+# -----------------------------------------------------------------------------
+# Configuration & Defaults
+# -----------------------------------------------------------------------------
+
+# Host Locale
 export LC_ALL=${LC_ALL:-C}
 export LANG=${LANG:-C}
 
-# Usage/help
-usage() {
-  cat <<USAGE
-Usage: $0 [CT_ID] [options]
-
-Positional:
-  CT_ID                 Container ID (default: ${CT_ID:-1550})
-
-Options:
-  -t, --template TEMPLATE_FAMILY   Template family (simple substring or exact name; env: TEMPLATE_FAMILY)
-  ## TEMPLATE_FAMILY should be a simple substring or exact template name.
-  ## Avoid complex regex here — use an exact template filename via
-  ## `TEMPLATE_FILE_OVERRIDE` or a short substring like 'alpine'.
-  -v, --version TERRARIA_VERSION   Terraria version (env: TERRARIA_VERSION)
-  --dhcp                          Use DHCP for container network (env: NET_DHCP=yes)
-  --ip NET_IP                     Container IP with CIDR (env: NET_IP)
-  --gw NET_GW                     Gateway (env: NET_GW)
-  -p, --port PORT                  Server port (env: SERVER_PORT)
-  -m, --maxplayers N               Max players (env: MAX_PLAYERS)
-  -h, --help                       Show this help
-USAGE
-}
-
-# Parse arguments (simple long/short handling)
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -h|--help) usage; exit 0 ;;
-    -t|--template) TEMPLATE_FAMILY="$2"; shift 2 ;;
-    -v|--version) TERRARIA_VERSION="$2"; shift 2 ;;
-    --dhcp) NET_DHCP=yes; shift ;;
-    --ip) NET_IP="$2"; shift 2 ;;
-    --gw) NET_GW="$2"; shift 2 ;;
-    -p|--port) SERVER_PORT="$2"; shift 2 ;;
-    -m|--maxplayers) MAX_PLAYERS="$2"; shift 2 ;;
-    --) shift; break ;;
-    -*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
-    *) break ;;
-  esac
-done
-
-# Allow env overrides for key vars (keeps existing defaults if not set)
-TEMPLATE_FAMILY=${TEMPLATE_FAMILY:-${TEMPLATE_FAMILY:-'alpine-[0-9]+(\.[0-9]+)?-standard'}}
-TERRARIA_VERSION=${TERRARIA_VERSION:-${TERRARIA_VERSION:-'1450'}}
-NET_DHCP=${NET_DHCP:-${NET_DHCP:-no}}
-NET_IP=${NET_IP:-${NET_IP:-'10.1.15.50/24'}}
-NET_GW=${NET_GW:-${NET_GW:-'10.1.15.1'}}
-SERVER_PORT=${SERVER_PORT:-${SERVER_PORT:-7777}}
-MAX_PLAYERS=${MAX_PLAYERS:-${MAX_PLAYERS:-8}}
-
-
-# Config - Adjust as needed (preserve any values set via flags/env)
-CT_ID=${1:-${CT_ID:-1550}}
+# Container Defaults
+CT_ID=${CT_ID:-1550}
 CT_NAME=${CT_NAME:-"terraria-server"}
 STORAGE=${STORAGE:-"local-lvm"}
 MEMORY=${MEMORY:-2048}
 CORES=${CORES:-2}
 DISK=${DISK:-8}
-NET_GW=${NET_GW:-"10.1.15.1"}
-NET_IP=${NET_IP:-"10.1.15.50/24"}
-TERRARIA_VERSION=${TERRARIA_VERSION:-"1450"} # Version 1.4.5
 
-echo "--- Starting Deploy of Terraria LXC (ID: $CT_ID) ---"
+# Network Defaults (Resilient)
+NET_DHCP="yes"
+NET_GW=""
+NET_IP=""
 
-# Guided interactive setup (only when running interactively)
-if [ -t 0 ]; then
-  echo "Starting guided configuration. Press ENTER to accept defaults."
-  read -rp "Use DHCP for container network? (y/N): " _use_dhcp
-  if [[ "$_use_dhcp" =~ ^[Yy] ]]; then
-    NET_DHCP=yes
+# Terraria Server Defaults
+TERRARIA_VERSION=${TERRARIA_VERSION:-"1450"}
+SERVER_PORT=${SERVER_PORT:-7777}
+MAX_PLAYERS=${MAX_PLAYERS:-8}
+WORLD_SIZE=${WORLD_SIZE:-2}     # 1=small, 2=medium, 3=large
+DIFFICULTY=${DIFFICULTY:-1}     # 0=classic, 1=expert, 2=master, 3=journey
+WORLD_NAME=${WORLD_NAME:-"Terraria"}
+WORLD_EVIL=${WORLD_EVIL:-1}     # 1=Random, 2=Corrupt, 3=Crimson
+SEED=${SEED:-""}
+SECRET_SEED=${SECRET_SEED:-""}
+PASSWORD=${PASSWORD:-""}
+MOTD=${MOTD:-"Welcome explicitly"}
+SECURE=${SECURE:-0}
+AUTOCREATE=${AUTOCREATE:-0}
+
+# Host Integrations
+ENABLE_BACKUP=${ENABLE_BACKUP:-0}
+BACKUP_SCHEDULE=${BACKUP_SCHEDULE:-"daily"} # daily, hourly, 6h, weekly, or custom cron
+ENABLE_DISCORD=${ENABLE_DISCORD:-0}
+ENABLE_MONITOR=${ENABLE_MONITOR:-0}
+DISCORD_URL=${DISCORD_URL:-""}
+ENABLE_BOT=${ENABLE_BOT:-0}
+BOT_TOKEN=${BOT_TOKEN:-""}
+BOT_USER_ID=${BOT_USER_ID:-""}
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# -----------------------------------------------------------------------------
+# 1. Wizard & Argument Parsing
+# -----------------------------------------------------------------------------
+
+usage() {
+  cat <<USAGE
+Usage: $0 [CT_ID] [options]
+
+Positional:
+  CT_ID                 Container ID (default: ${CT_ID})
+
+Options:
+  -t, --template FAMILY    Template family (e.g. alpine, ubuntu)
+  -v, --version VER        Terraria version (default: 1450)
+  --static                 Use static IP (requires --ip and --gw)
+  --ip CIDR                Static IP (e.g. 10.1.15.50/24)
+  --gw IP                  Gateway (e.g. 10.1.15.1)
+  -p, --port PORT          Server port
+  -m, --maxplayers N       Max players
+  --evil TYPE              World Evil (1=Random, 2=Corrupt, 3=Crimson)
+  --seed TEXT              World Seed
+  --secret-seed TEXT       Enable Secret Seed (e.g. 'not the bees')
+  --enable-backup          Enable automated backups
+  --backup-schedule TYPE   Schedule: daily, hourly, 6h, weekly, or "cron expr" (def: daily)
+  --enable-monitor         Enable resource monitoring (RAM usage > 90%)
+  --discord-url URL        Configure Discord Webhook URL (Notifications)
+  --enable-bot             Enable Discord Commander Bot
+  --bot-token TOKEN        Discord Bot Token
+  --bot-userid ID          Your Discord User ID (Admin)
+  -h, --help               Show this help
+USAGE
+}
+
+# Variable to track if arguments were provided
+ARGS_PROVIDED=0
+if [ "$#" -gt 0 ]; then
+    ARGS_PROVIDED=1
+fi
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -t|--template) TEMPLATE_FAMILY="$2"; shift 2 ;;
+    -v|--version) TERRARIA_VERSION="$2"; shift 2 ;;
+    --static) NET_DHCP="no"; shift ;;
+    --dhcp) NET_DHCP="yes"; shift ;;
+    --ip) NET_IP="$2"; NET_DHCP="no"; shift 2 ;;
+    --gw) NET_GW="$2"; shift 2 ;;
+    -p|--port) SERVER_PORT="$2"; shift 2 ;;
+    -m|--maxplayers) MAX_PLAYERS="$2"; shift 2 ;;
+    --evil) WORLD_EVIL="$2"; shift 2 ;;
+    --seed) SEED="$2"; shift 2 ;;
+    --secret-seed) SECRET_SEED="$2"; shift 2 ;;
+    --enable-backup) ENABLE_BACKUP=1; shift ;;
+    --backup-schedule) ENABLE_BACKUP=1; BACKUP_SCHEDULE="$2"; shift 2 ;;
+    --enable-monitor) ENABLE_MONITOR=1; shift ;;
+    --discord-url) ENABLE_DISCORD=1; DISCORD_URL="$2"; shift 2 ;;
+    --enable-bot) ENABLE_BOT=1; shift ;;
+    --bot-token) ENABLE_BOT=1; BOT_TOKEN="$2"; shift 2 ;;
+    --bot-userid) ENABLE_BOT=1; BOT_USER_ID="$2"; shift 2 ;;
+    -*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    *) 
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        CT_ID="$1"; shift
+      else
+        break
+      fi
+      ;;
+  esac
+done
+
+# Wizard Interactive Mode
+if [ "$ARGS_PROVIDED" -eq 0 ] && [ -t 0 ]; then
+  echo "--- Interactive Configuration ---"
+  echo "Press ENTER to accept defaults."
+  
+  read -rp "Container ID [$CT_ID]: " input_id
+  CT_ID=${input_id:-$CT_ID}
+
+  read -rp "Terraria Version [$TERRARIA_VERSION]: " input_ver
+  TERRARIA_VERSION=${input_ver:-$TERRARIA_VERSION}
+
+  read -rp "Use DHCP? (Y/n) [Y]: " input_dhcp
+  if [[ "$input_dhcp" =~ ^[Nn] ]]; then
+      NET_DHCP="no"
+      read -rp "Static IP (CIDR) [10.1.15.50/24]: " input_ip
+      NET_IP=${input_ip:-"10.1.15.50/24"}
+      read -rp "Gateway [10.1.15.1]: " input_gw
+      NET_GW=${input_gw:-"10.1.15.1"}
   else
-    NET_DHCP=no
-    read -rp "Gateway [$NET_GW]: " input_gw
-    NET_GW=${input_gw:-$NET_GW}
-    read -rp "Container IP (with CIDR) [$NET_IP]: " input_ip
-    NET_IP=${input_ip:-$NET_IP}
+      NET_DHCP="yes"
   fi
 
-  read -rp "Server port [7777]: " input_port
-  SERVER_PORT=${input_port:-7777}
-  read -rp "Max players [8]: " input_players
-  MAX_PLAYERS=${input_players:-8}
-  read -rp "World size (1=small,2=medium,3=large) [2]: " input_world
-  WORLD_SIZE=${input_world:-2}
-  read -rp "Difficulty (0=classic,1=expert,2=master,3=journey) [1]: " input_diff
-  DIFFICULTY=${input_diff:-1}
-  read -rp "World name [Terraria]: " input_wname
-  WORLD_NAME=${input_wname:-Terraria}
-  read -rp "Seed (optional): " SEED
-  read -rp "Password (leave empty for none): " PASSWORD
-  read -rp "Message of the day (MOTD) (optional): " MOTD
-  read -rp "Enable secure mode? (0/1) [0]: " input_secure
-  SECURE=${input_secure:-0}
-  read -rp "Auto-create world if missing? (y/N): " _autocreate
-  if [[ "$_autocreate" =~ ^[Yy] ]]; then
+  read -rp "Server Port [$SERVER_PORT]: " input_port
+  SERVER_PORT=${input_port:-$SERVER_PORT}
+
+  read -rp "Max Players [$MAX_PLAYERS]: " input_players
+  MAX_PLAYERS=${input_players:-$MAX_PLAYERS}
+
+  read -rp "World Name [$WORLD_NAME]: " input_wname
+  WORLD_NAME=${input_wname:-$WORLD_NAME}
+  
+  read -rp "World Size (1=small, 2=medium, 3=large) [$WORLD_SIZE]: " input_size
+  WORLD_SIZE=${input_size:-$WORLD_SIZE}
+
+  read -rp "Difficulty (0=classic, 1=expert, 2=master, 3=journey) [$DIFFICULTY]: " input_diff
+  DIFFICULTY=${input_diff:-$DIFFICULTY}
+
+  read -rp "World Evil (1=Random, 2=Corrupt, 3=Crimson) [$WORLD_EVIL]: " input_evil
+  WORLD_EVIL=${input_evil:-$WORLD_EVIL}
+
+  read -rp "Seed (optional): " input_seed
+  SEED=${input_seed:-$SEED}
+  
+  read -rp "Secret Seed (optional, e.g. 'not the bees'): " input_secret
+  SECRET_SEED=${input_secret:-$SECRET_SEED}
+
+  read -rp "Password (empty for none): " input_pass
+  PASSWORD=${input_pass:-$PASSWORD}
+
+  read -rp "Message of the day (MOTD) [$MOTD]: " input_motd
+  MOTD=${input_motd:-$MOTD}
+
+  read -rp "Enable secure mode? (0/1) [$SECURE]: " input_secure
+  SECURE=${input_secure:-$SECURE}
+
+  read -rp "Auto-create world if missing? (y/N) [N]: " input_autocreate
+  if [[ "$input_autocreate" =~ ^[Yy] ]]; then
+    # Auto-create requires passing the world size (1, 2, or 3)
     AUTOCREATE=$WORLD_SIZE
   else
     AUTOCREATE=0
   fi
-else
-  # non-interactive: keep current defaults
-  NET_DHCP=no
-  SERVER_PORT=7777
-  MAX_PLAYERS=8
-  WORLD_SIZE=2
-  DIFFICULTY=1
-  WORLD_NAME="Terraria"
-  SEED=""
-  PASSWORD=""
-  MOTD=""
-  SECURE=0
-  AUTOCREATE=0
-fi
 
-# Build network option for pct
-if [ "$NET_DHCP" = "yes" ]; then
-  NET0_OPTS="name=eth0,bridge=vmbr0,firewall=0,ip=dhcp,type=veth"
-else
-  NET0_OPTS="name=eth0,bridge=vmbr0,firewall=0,gw=$NET_GW,ip=$NET_IP,type=veth"
-fi
-# Pre-flight checks
-for cmd in pveam pct; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "$cmd not found. This script must be run on a Proxmox host with $cmd available." >&2
-    exit 1
-  fi
-done
-
-# check container id doesn't already exist
-if pct status "$CT_ID" >/dev/null 2>&1; then
-  echo "Container ID $CT_ID already exists. Aborting to avoid overwrite." >&2
-  exit 1
-fi
-
-# basic storage check (best-effort)
-if command -v pvesm >/dev/null 2>&1; then
-  if ! pvesm status | grep -qw "$STORAGE"; then
-    echo "Warning: storage '$STORAGE' not found in pvesm status; pct create may fail." >&2
-  fi
-fi
-
-# 1. Download Template if not exists (prefer lightweight Alpine template)
-# To change template, set environment variable `TEMPLATE_FAMILY` before running.
-# Example: TEMPLATE_FAMILY="ubuntu-22.04-standard" ./install.sh
-
-# ensure pveam index is fresh (ignore failure if offline)
-pveam update >/dev/null 2>&1 || true
-
-# try to find the latest available template for the chosen family
-# Try to find the latest available template for the chosen family in a safe, stepwise way.
-TEMPLATE_FILE=""
-# Default to a known-good Alpine template file if not overridden
-TEMPLATE_FILE_OVERRIDE=${TEMPLATE_FILE_OVERRIDE:-'alpine-3.23-default_20260116_amd64.tar.xz'}
-# Allow explicit override of the exact template filename (safer for reproducible runs)
-if [ -n "${TEMPLATE_FILE_OVERRIDE:-}" ]; then
-  TEMPLATE_FILE="$TEMPLATE_FILE_OVERRIDE"
-else
-  available_out=$(pveam available 2>/dev/null || true)
-  # If the family looks like an exact template name (contains '_' or '/'),
-  # prefer exact (fixed-string) match; otherwise do a case-insensitive substring match.
-  if printf "%s" "$TEMPLATE_FAMILY" | grep -qF "_" || printf "%s" "$TEMPLATE_FAMILY" | grep -qF "/"; then
-    cand_lines=$(printf "%s" "$available_out" | grep -F "$TEMPLATE_FAMILY" || true)
-  else
-    cand_lines=$(printf "%s" "$available_out" | grep -i "alpine" || true)
+  read -rp "Enable automated backups? (y/N) [N]: " input_backup
+  if [[ "$input_backup" =~ ^[Yy] ]]; then
+    ENABLE_BACKUP=1
+    echo "Backup Frequency:"
+    echo "  1) Daily at 04:00 (default)"
+    echo "  2) Hourly"
+    echo "  3) Every 6 hours"
+    echo "  4) Weekly (Sunday at 04:00)"
+    echo "  5) Custom Cron Expression"
+    read -rp "Select option [1]: " input_freq
+    case "${input_freq:-1}" in
+      1) BACKUP_SCHEDULE="daily" ;;
+      2) BACKUP_SCHEDULE="hourly" ;;
+      3) BACKUP_SCHEDULE="6h" ;;
+      4) BACKUP_SCHEDULE="weekly" ;;
+      5) read -rp "Enter Cron Expression (e.g. '0 12 * * *'): " BACKUP_SCHEDULE ;;
+      *) BACKUP_SCHEDULE="daily" ;;
+    esac
   fi
 
-  # Extract the first token from each matched line (the template file name)
-  if [ -n "$cand_lines" ]; then
-    matches=$(printf "%s" "$cand_lines" | awk '{print $1}' || true)
-    if [ -n "$matches" ]; then
-      TEMPLATE_FILE=$(printf "%s\n" "$matches" | sort -V | tail -n1)
-    fi
+  read -rp "Enable Resource Monitoring (alert if RAM > 90%)? (y/N) [N]: " input_monitor
+  if [[ "$input_monitor" =~ ^[Yy] ]]; then
+    ENABLE_MONITOR=1
   fi
-fi
 
-TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE_FILE"
-if [ -z "$TEMPLATE_FILE" ]; then
-  echo "No template found for '${TEMPLATE_FAMILY}' from pveam; refreshing index and retrying..." >&2
-  pveam update >/dev/null 2>&1 || true
-  available_out=$(pveam available 2>/dev/null || true)
-  if printf "%s" "$TEMPLATE_FAMILY" | grep -qF "_" || printf "%s" "$TEMPLATE_FAMILY" | grep -qF "/"; then
-    cand_lines=$(printf "%s" "$available_out" | grep -F "$TEMPLATE_FAMILY" || true)
-  else
-    cand_lines=$(printf "%s" "$available_out" | grep -i "alpine" || true)
+  read -rp "Setup Discord Notifications (Webhook)? (y/N) [N]: " input_discord
+  if [[ "$input_discord" =~ ^[Yy] ]]; then
+    ENABLE_DISCORD=1
+    read -rp "Webhook URL: " DISCORD_URL
   fi
-  if [ -n "$cand_lines" ]; then
-    matches=$(printf "%s" "$cand_lines" | awk '{print $1}' || true)
-    if [ -n "$matches" ]; then
-      TEMPLATE_FILE=$(printf "%s\n" "$matches" | sort -V | tail -n1)
-    fi
+
+  read -rp "Enable Discord Commander Bot (Control via chat)? (y/N) [N]: " input_bot
+  if [[ "$input_bot" =~ ^[Yy] ]]; then
+    ENABLE_BOT=1
+    echo "You need a Bot Token from discord.com/developers and your User ID."
+    read -rp "Bot Token: " BOT_TOKEN
+    read -rp "Your User ID: " BOT_USER_ID
   fi
+  
+  echo "---------------------------------"
 fi
 
-if [ -z "$TEMPLATE_FILE" ]; then
-  echo "Error: could not find any template matching '${TEMPLATE_FAMILY}'. Aborting." >&2
-  exit 1
-fi
 
-if [ ! -f "$TEMPLATE_PATH" ]; then
-  echo "Downloading template $TEMPLATE_FILE..."
-  pveam update && pveam download local "$TEMPLATE_FILE"
-fi
+# -----------------------------------------------------------------------------
+# 2. Idempotency Check
+# -----------------------------------------------------------------------------
 
-# 2. Create the Container (with storage fallback for single-node / quorum errors)
-create_with_storage() {
-  storage="$1"
-  if pct create "$CT_ID" "$TEMPLATE_PATH" \
-    --arch amd64 --hostname "$CT_NAME" \
-    --cores "$CORES" --memory "$MEMORY" --swap 512 \
-    --storage "$storage" --rootfs "$DISK" \
-    --net0 "$NET0_OPTS" \
-    --unprivileged 1 --onboot 1; then
-    return 0
-  else
-    return 1
+# Helper for host-side notifications
+notify_install() {
+  local status="$1"
+  local title="$2"
+  local msg="$3"
+  local script_dir="$(dirname "$0")"
+  
+  if [ -x "$script_dir/scripts/discord_webhook.sh" ] && [ -n "${DISCORD_URL:-}" ]; then
+    local args=(--title "$title" --desc "$msg" --status "$status" --url "$DISCORD_URL")
+    args+=(--field "CT ID:$CT_ID")
+    
+    # Try to get IP
+    local ip=$(pct exec "$CT_ID" -- ip -4 a s eth0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1 || echo "Unknown")
+    args+=(--field "Server Address:$ip")
+    
+    "$script_dir/scripts/discord_webhook.sh" "${args[@]}" || true
   fi
 }
 
-echo "Checking cluster quorum and storage availability..."
-# If the Proxmox cluster is not ready or has no quorum, prefer local storage
-if command -v pvecm >/dev/null 2>&1; then
-  if ! pvecm status >/dev/null 2>&1 || pvecm status 2>/dev/null | grep -Eiq 'no quorum|quorum: no'; then
-    echo "Warning: Proxmox cluster not ready or no quorum detected; preferring local storage." >&2
-    if command -v pvesm >/dev/null 2>&1; then
-      if pvesm status | awk 'NR>1{print $1}' | grep -qw local; then
-        STORAGE="local"
-      else
-        candidate=$(pvesm status 2>/dev/null | awk 'NR>1{print $1}' | head -n1 || true)
-        if [ -n "$candidate" ]; then
-          STORAGE="$candidate"
+trap 'notify_install "error" "Installation Failed" "Terraria installation failed for CT $CT_ID."; echo "Error on line $LINENO" >&2; exit 1' ERR
+
+if [ "$ENABLE_DISCORD" -eq 1 ] && [ -n "$DISCORD_URL" ]; then
+  notify_install "info" "Installation Started" "Beginning deployment of Terraria Server on CT $CT_ID..."
+fi
+
+DO_CREATE=1
+
+if command -v pct >/dev/null && pct status "$CT_ID" >/dev/null 2>&1; then
+  echo "Container '$CT_ID' already exists."
+  read -rp "Do you want to skip creation and run provisioning only? (y/N): " _choice
+  if [[ "$_choice" =~ ^[Yy] ]]; then
+    DO_CREATE=0
+  else
+    echo "Aborting to prevent overwrite."
+    exit 1
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# 3. Container Creation with Retry Logic
+# -----------------------------------------------------------------------------
+
+create_container_attempt() {
+    local target_storage="$1"
+    
+    # Template Logic
+    # Default to 'system' which maps to a specific Debian 13 template file
+    TEMPLATE_FAMILY=${TEMPLATE_FAMILY:-"system"}
+
+    # If TEMPLATE_FAMILY is 'system' and no explicit TEMPLATE_FILE_OVERRIDE
+    # was provided, use the known Debian 13 template file name.
+    if [ "${TEMPLATE_FAMILY}" = "system" ] && [ -z "${TEMPLATE_FILE_OVERRIDE:-}" ]; then
+      TEMPLATE_FILE_OVERRIDE="debian-13-standard_13.1-2_amd64.tar.zst"
+    fi
+    
+    # Update pveam if needed
+    pveam update >/dev/null 2>&1 || true
+    
+    if [ -n "${TEMPLATE_FILE_OVERRIDE:-}" ]; then
+        TEMPLATE_FILE="$TEMPLATE_FILE_OVERRIDE"
+    else
+        # Robust template search: match templates whose name starts with the family
+        TEMPLATE_FILE=$(pveam available | awk '{print $1}' | grep -iE "^${TEMPLATE_FAMILY}" | sort -V | tail -n1)
+    fi
+
+    if [ -z "$TEMPLATE_FILE" ]; then
+        echo "Error: No template found for '$TEMPLATE_FAMILY'."
+        return 1
+    fi
+    
+    TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE_FILE"
+    if [ ! -f "$TEMPLATE_PATH" ]; then
+        echo "Downloading template $TEMPLATE_FILE..."
+        pveam download local "$TEMPLATE_FILE" || return 1
+    fi
+
+    # Network Config
+    if [ "$NET_DHCP" = "yes" ]; then
+        NET0_OPTS="name=eth0,bridge=vmbr0,firewall=0,ip=dhcp,type=veth"
+    else
+        # Ensure defaults if empty
+        if [ -z "$NET_IP" ]; then NET_IP="10.1.15.50/24"; fi
+        if [ -z "$NET_GW" ]; then NET_GW="10.1.15.1"; fi
+        NET0_OPTS="name=eth0,bridge=vmbr0,firewall=0,gw=$NET_GW,ip=$NET_IP,type=veth"
+    fi
+
+    # DNS Fix: Force 8.8.8.8
+    # Using explicit --nameserver checks for valid DNS on container create
+    echo "Attempting to create container on storage '$target_storage'..."
+    pct create "$CT_ID" "$TEMPLATE_PATH" \
+        --arch amd64 --hostname "$CT_NAME" \
+        --cores "$CORES" --memory "$MEMORY" --swap 512 \
+        --storage "$target_storage" --rootfs "$DISK" \
+        --net0 "$NET0_OPTS" \
+        --nameserver "8.8.8.8" \
+        --unprivileged 1 \
+        --onboot 1
+}
+
+if [ "$DO_CREATE" -eq 1 ]; then
+    echo "--- Creating Container $CT_ID ---"
+    
+    # Retry/Fallback Logic
+    if ! create_container_attempt "$STORAGE"; then
+        echo "Creation failed on primary storage '$STORAGE'."
+        
+        # Try fallback to 'local' if it's different and available
+        if [ "$STORAGE" != "local" ] && pvesm status | grep -qw "local"; then
+            echo "Retrying on fallback storage 'local'..."
+            if ! create_container_attempt "local"; then
+                echo "Fallback creation failed."
+                exit 1
+            fi
+        else
+            echo "No fallback storage available or already tried."
+            exit 1
         fi
-      fi
     fi
-    echo "Using storage: $STORAGE"
-  fi
+
+    echo "Starting container..."
+    pct start "$CT_ID"
+    echo "Waiting for network (10s)..."
+    sleep 10
 fi
 
-echo "Creating container (preferred storage: $STORAGE)..."
-try_create_with_retries() {
-  target_storage="$1"
-  max_attempts=${2:-5}
-  attempt=1
-  while [ "$attempt" -le "$max_attempts" ]; do
-    if create_with_storage "$target_storage"; then
-      return 0
+# -----------------------------------------------------------------------------
+# 4. Provisioning (Inner Script - Multi-Distro)
+# -----------------------------------------------------------------------------
+echo "--- Starting Provisioning ---"
+
+# We export variables to the 'env' command so they are available in the shell spawned by 'pct exec'.
+pct exec "$CT_ID" -- env \
+  TERRARIA_VERSION="$TERRARIA_VERSION" \
+  SERVER_PORT="$SERVER_PORT" \
+  MAX_PLAYERS="$MAX_PLAYERS" \
+  WORLD_NAME="$WORLD_NAME" \
+  WORLD_SIZE="$WORLD_SIZE" \
+  DIFFICULTY="$DIFFICULTY" \
+  WORLD_EVIL="$WORLD_EVIL" \
+  SEED="$SEED" \
+  SECRET_SEED="$SECRET_SEED" \
+  PASSWORD="$PASSWORD" \
+  MOTD="$MOTD" \
+  SECURE="$SECURE" \
+  AUTOCREATE="$AUTOCREATE" \
+  DISCORD_URL="$DISCORD_URL" \
+  LC_ALL=C \
+  /bin/sh -s <<'EOF'
+    set -e
+    
+    # Save Discord URL for internal scripts (launch.sh)
+    if [ -n "$DISCORD_URL" ]; then
+       echo "$DISCORD_URL" > /opt/terraria/.discord_url
+       chmod 600 /opt/terraria/.discord_url
+       chown terraria:terraria /opt/terraria/.discord_url
     fi
 
-    # if cluster reports no quorum, wait and retry; otherwise stop retrying
-    if command -v pvecm >/dev/null 2>&1 && pvecm status 2>/dev/null | grep -Eiq 'no quorum|quorum: no'; then
-      echo "Detected cluster no-quorum state; retrying create (attempt $attempt/$max_attempts)..." >&2
-      sleep $((attempt * 5))
-      attempt=$((attempt + 1))
-      continue
-    else
-      # non-quorum error (immediate failure)
-      return 1
-    fi
-  done
-  return 1
+    # Create the Launch Wrapper (handles notifications)
+    cat > /opt/terraria/launch.sh <<'LAUNCH'
+#!/bin/bash
+# Wrapper to run Terraria and handle Start/Stop notifications
+DIR="/opt/terraria"
+BIN="$DIR/TerrariaServer.bin.x86_64"
+CONF="$DIR/serverconfig.txt"
+URL_FILE="$DIR/.discord_url"
+
+# Simple Notification Function
+notify() {
+    [ ! -f "$URL_FILE" ] && return
+    local title="$1"
+    local color="$2" # integer
+    local desc="$3"
+    local url=$(cat "$URL_FILE")
+    [ -z "$url" ] && return
+    
+    # Try to get local IP
+    local ip=$(ip -4 a s eth0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1 || echo "Unknown")
+
+    # JSON Payload (minimal)
+    local json=$(cat <<J
+{
+  "embeds": [{
+    "title": "$title",
+    "description": "$desc",
+    "color": $color,
+    "fields": [
+      { "name": "Server IP", "value": "$ip", "inline": true }
+    ],
+    "footer": { "text": "Terraria Server Status" },
+    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  }]
+}
+J
+)
+    curl -s -H "Content-Type: application/json" -d "$json" "$url" >/dev/null || true
 }
 
-created=0
-if try_create_with_retries "$STORAGE" 5; then
-  echo "Container created on storage '$STORAGE'."
-  created=1
+notify "Server Starting" 3447003 "Terraria Server is booting up..."
+
+# Run the Server
+"$BIN" -config "$CONF"
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    notify "Server Stopped" 15158332 "Server shut down normally."
+else
+    notify "Server Crashed" 15158332 "Server exited with error code $EXIT_CODE."
 fi
 
-if [ "$created" -ne 1 ]; then
-  echo "Initial pct create failed with storage '$STORAGE'. Trying fallback storage..." >&2
-  # Prefer 'local' if present, else pick first storage reported by pvesm
-  fallback=""
-  if command -v pvesm >/dev/null 2>&1; then
-    if pvesm status | awk 'NR>1{print $1}' | grep -qw local; then
-      fallback="local"
-    else
-      fallback=$(pvesm status 2>/dev/null | awk 'NR>1{print $1}' | head -n1 || true)
+exit $EXIT_CODE
+LAUNCH
+    chmod +x /opt/terraria/launch.sh
+    
+    # Ensure DNS resolution via fallback if DHCP failed to provide it
+    if ! ping -c 1 google.com >/dev/null 2>&1; then
+        echo "Network check failed. Forcing DNS 8.8.8.8 in /etc/resolv.conf..."
+        echo "nameserver 8.8.8.8" > /etc/resolv.conf
     fi
-  fi
 
-  if [ -n "$fallback" ] && [ "$fallback" != "$STORAGE" ]; then
-    echo "Attempting create on fallback storage: $fallback"
-    if try_create_with_retries "$fallback" 5; then
-      STORAGE="$fallback"
-      echo "Container created on fallback storage '$STORAGE'."
-      created=1
+    echo "Detecting Package Manager..."
+    if command -v apk >/dev/null 2>&1; then
+        echo "Alpine detected."
+        apk update
+        apk add --no-cache bash findutils icu-libs wget unzip tmux curl ca-certificates iproute2
+    elif command -v apt-get >/dev/null 2>&1; then
+      echo "Debian/Ubuntu detected."
+      apt-get update
+      apt-get install -y wget unzip tmux libicu-dev supervisor curl ca-certificates iproute2
+    elif command -v dnf >/dev/null 2>&1; then
+        echo "Fedora/RHEL detected."
+        dnf install -y wget unzip tmux libicu curl ca-certificates iproute
     else
-      echo "Fallback create failed on storage '$fallback'. Aborting." >&2
-      exit 1
+        echo "Error: No supported package manager found (apk, apt, dnf)."
+        exit 1
     fi
-  else
-    # If there's no different fallback, try retrying the original storage a few more times
-    echo "No different fallback storage found; retrying original storage a couple more times..." >&2
-    if try_create_with_retries "$STORAGE" 3; then
-      echo "Container created on storage '$STORAGE' after additional retries.";
-      created=1
-    else
-      echo "No suitable fallback storage found and retries exhausted. Aborting." >&2
-      exit 1
+    
+    # Create User 'terraria' with predictable home and shell
+    if ! id -u terraria >/dev/null 2>&1; then
+      echo "Creating user terraria..."
+      if command -v apk >/dev/null 2>&1; then
+         # Alpine
+         adduser -D -h /home/terraria -s /bin/sh terraria
+      else
+         # Debian/Ubuntu/Fedora/Other -> prefer useradd
+         # -m creates home, -U creates a group with the same name
+         useradd -m -d /home/terraria -s /bin/bash -U terraria || \
+         useradd -m -d /home/terraria -s /bin/sh -U terraria || \
+         useradd -m -s /bin/sh terraria
+      fi
     fi
-  fi
-fi
 
-pct start $CT_ID
-echo "Waiting for network initialization..."
-sleep 15
+    # Determine the terraria user's home directory and ensure it's present
+    TERRARIA_HOME=$(getent passwd terraria | cut -d: -f6 || true)
+    if [ -z "${TERRARIA_HOME}" ]; then
+      TERRARIA_HOME="/home/terraria"
+    fi
+    mkdir -p "$TERRARIA_HOME" 2>/dev/null || true
+    chown -R terraria:terraria "$TERRARIA_HOME" || true
 
-# 3. Internal Provisioning
-pct exec $CT_ID -- sh -c "
-  set -e
-  if command -v dnf >/dev/null 2>&1; then
-    PKG_UPDATE='dnf -y update'
-    PKG_INSTALL='dnf -y install wget unzip tmux libicu'
-  elif command -v apt-get >/dev/null 2>&1; then
-    PKG_UPDATE='apt-get update'
-    PKG_INSTALL='apt-get install -y wget unzip tmux libicu-dev'
-  elif command -v apk >/dev/null 2>&1; then
-    PKG_UPDATE='apk update'
-    PKG_INSTALL='apk add --no-cache wget unzip tmux icu-libs'
-  else
-    echo 'No supported package manager found inside container' >&2
-    exit 1
-  fi
-  eval "\$PKG_UPDATE"
-  eval "\$PKG_INSTALL"
-  mkdir -p /opt/terraria && cd /opt/terraria
-  ZIP_URL="https://terraria.org/api/download/pc-dedicated-server/terraria-server-$TERRARIA_VERSION.zip"
-  ZIP_FILE="terraria-server-${TERRARIA_VERSION}.zip"
-  RETRIES=3
-  ok=0
-  for i in $(seq 1 $RETRIES); do
+    # Optionally add `terraria` to a supplementary group (default: games)
+    TERRARIA_GROUP=${TERRARIA_GROUP:-games}
+    if getent group "$TERRARIA_GROUP" >/dev/null 2>&1; then
+      if command -v usermod >/dev/null 2>&1; then
+        usermod -aG "$TERRARIA_GROUP" terraria || true
+      elif command -v adduser >/dev/null 2>&1; then
+        # adduser syntax varies; try this form as a fallback
+        adduser terraria "$TERRARIA_GROUP" >/dev/null 2>&1 || true
+      fi
+    fi
+    
+    mkdir -p /opt/terraria
+    cd /opt/terraria
+    
+    # Download
+    ZIP_FILE="terraria-server.zip"
+    URL="https://terraria.org/api/download/pc-dedicated-server/terraria-server-$TERRARIA_VERSION.zip"
+    
+    echo "Downloading Terraria Server $TERRARIA_VERSION..."
     if command -v wget >/dev/null 2>&1; then
-      wget -q -O "$ZIP_FILE" "$ZIP_URL" || true
-    elif command -v curl >/dev/null 2>&1; then
-      curl -sSfL -o "$ZIP_FILE" "$ZIP_URL" || true
+        wget -q -O "$ZIP_FILE" "$URL"
     else
-      echo 'No downloader available inside container' >&2
+        curl -L -o "$ZIP_FILE" "$URL"
+    fi
+    
+    echo "Extracting..."
+    # Check for unzip availability
+    if ! command -v unzip >/dev/null 2>&1; then
+        echo "Error: unzip not found."
+        exit 1
+    fi
+    unzip -q -o "$ZIP_FILE"
+    
+    # Dynamic Paths: Find the binary
+    echo "Locating binary..."
+    BIN_PATH=$(find . -type f -name "TerrariaServer.bin.x86_64" | head -n1)
+    
+    if [ -z "$BIN_PATH" ]; then
+      echo "Error: Could not locate TerrariaServer.bin.x86_64 in extracted files."
+      ls -R
       exit 1
     fi
-
-    # optional checksum verification if provided via env TERRARIA_ZIP_SHA256
-    if [ -n "${TERRARIA_ZIP_SHA256:-}" ]; then
-      echo "${TERRARIA_ZIP_SHA256}  $ZIP_FILE" > /tmp/sha256sum.txt
-      if sha256sum -c /tmp/sha256sum.txt >/dev/null 2>&1; then
-        ok=1; break
-      else
-        echo "Checksum mismatch, retrying..." >&2
-      fi
-    else
-      # basic archive sanity check
-      if unzip -tq "$ZIP_FILE" >/dev/null 2>&1; then
-        ok=1; break
-      else
-        echo "Archive test failed, retrying..." >&2
-      fi
+    
+    # Move contents to /opt/terraria if nested
+    SOURCE_DIR=$(dirname "$BIN_PATH")
+    if [ "$SOURCE_DIR" != "." ]; then
+      echo "Moving files from $SOURCE_DIR to /opt/terraria..."
+      mv "$SOURCE_DIR"/* .
+      rmdir "$SOURCE_DIR" || true
     fi
-    sleep 2
-  done
-  if [ "$ok" -ne 1 ]; then
-    echo "Failed to download or verify Terraria server zip" >&2
-    exit 1
-  fi
-  unzip -q "$ZIP_FILE"
-  # locate the folder that contains the Linux binary (works with BusyBox find)
-  FIRST_BIN=$(find . -maxdepth 3 -type f -name 'TerrariaServer.bin.x86_64' -print | head -n1)
-  if [ -n "\$FIRST_BIN" ]; then
-    EXTRACT_DIR=$(dirname "\$FIRST_BIN")
-    mv "\$EXTRACT_DIR"/* .
-  else
-    echo 'Could not find extracted Linux binaries; listing archive contents:' >&2
-    ls -la
-    exit 1
-  fi
-  chmod +x TerrariaServer.bin.x86_64 || true
-  rm -rf "terraria-server-$TERRARIA_VERSION" "$TERRARIA_VERSION" "$ZIP_FILE"
-
-  # create terraria user and set ownership
-  if ! id -u terraria >/dev/null 2>&1; then
-    if command -v adduser >/dev/null 2>&1; then
-      adduser -D terraria || true
-    else
-      useradd -m -s /bin/sh terraria || true
+    
+    # Permissions
+    chmod +x TerrariaServer.bin.x86_64
+    if [ -f "TerrariaServer" ]; then
+        chmod +x TerrariaServer
     fi
-  fi
-  chown -R terraria:terraria /opt/terraria || true
-
-  # generate server config
-  cat > /opt/terraria/serverconfig.txt <<CONFIG
+    rm -f "$ZIP_FILE"
+    
+    chown -R terraria:terraria /opt/terraria
+    
+    # Generate Config
+    echo "Generating serverconfig.txt..."
+    cat > serverconfig.txt <<CONFIG
 port=$SERVER_PORT
 maxplayers=$MAX_PLAYERS
-autocreate=$AUTOCREATE
 worldname=$WORLD_NAME
+autocreate=$AUTOCREATE
 seed=$SEED
 difficulty=$DIFFICULTY
 password=$PASSWORD
@@ -407,10 +567,142 @@ motd=$MOTD
 secure=$SECURE
 upnp=0
 CONFIG
+    chown terraria:terraria serverconfig.txt
 
-  # install systemd unit or supervisor to manage the server
-  if command -v systemctl >/dev/null 2>&1; then
-    cat > /etc/systemd/system/terraria.service <<SERVICE
+    # Ensure a writable world file path exists and is referenced in the config
+    # Use the terraria user's home if available; create both terraria and root fallbacks
+    TERRARIA_HOME=${TERRARIA_HOME:-/home/terraria}
+    WORLD_FILE="$TERRARIA_HOME/.local/share/Terraria/Worlds/${WORLD_NAME}.wld"
+    WORLD_DIR="$(dirname \"$WORLD_FILE\")"
+    mkdir -p "$WORLD_DIR" 2>/dev/null || true
+    chown -R terraria:terraria "$WORLD_DIR" || true
+
+    # Also create the root fallback used on some templates (Alpine default)
+    mkdir -p /root/.local/share/Terraria/Worlds 2>/dev/null || true
+
+    # Append world= only if not already present in config
+    if ! grep -Eq '^world=' serverconfig.txt 2>/dev/null; then
+      echo "world=$WORLD_FILE" >> serverconfig.txt
+      chown terraria:terraria serverconfig.txt || true
+    fi
+
+    # Ensure world directories and ownerships for common Terraria locations
+    echo "Ensuring Worlds directories and ownership..."
+    for p in "/opt/terraria/Worlds" "/opt/terraria/Terraria/Worlds" "/home/terraria/.local/share/Terraria/Worlds"; do
+      mkdir -p "$p" 2>/dev/null || true
+      chown -R terraria:terraria "$p" || true
+    done
+
+    # If no worlds exist, FORCE a generation run to prevent service crash on first boot.
+    # We use input injection to answer the "Choose World" prompt that appears when the configured world is missing.
+    if ! find /opt/terraria -type f -name '*.wld' -print -quit >/dev/null 2>&1 && \
+       ! find /home/terraria -type f -name '*.wld' -print -quit >/dev/null 2>&1; then
+       
+       echo "No existing worlds found. Starting automatic world generation..."
+       echo "This may take a few minutes. Please wait..."
+       
+       # Prepare inputs: New World (n), Size, Difficulty, World Evil, Name, Seed, Secret Seed, Exit
+       # Defaults: Medium (2), Classic (1), "Terraria"
+       GEN_SIZE=${AUTOCREATE:-2}
+       [ "$GEN_SIZE" -eq 0 ] && GEN_SIZE=2
+       
+       # Config uses 0=Classic, 1=Expert...
+       # Menu uses 1=Classic, 2=Expert...
+       # So we map Config+1 to get Menu value.
+       GEN_DIFF=${DIFFICULTY:-1}
+       GEN_DIFF_MENU=$((GEN_DIFF + 1))
+       
+       GEN_EVIL=${WORLD_EVIL:-1}
+       GEN_NAME=${WORLD_NAME:-Terraria}
+       GEN_SEED=${SEED}
+       # Secret seed logic is complex (toggle menu), for standard automation we usually skip or just pass enter.
+       # If users want a specific seed, they usually provide GEN_SEED.
+       # The menu asks for "Seed" then "Secret Seed" confirmation.
+       
+       cat > /opt/terraria/setup.in <<INPUT
+n
+$GEN_SIZE
+$GEN_DIFF_MENU
+$GEN_EVIL
+$GEN_NAME
+$GEN_SEED
+
+exit
+INPUT
+       chown terraria:terraria /opt/terraria/setup.in
+       
+       # Run the server interactively with the input script
+       # We use 'timeout' to prevent hanging if something goes wrong, though generation can be slow.
+       if command -v timeout >/dev/null 2>&1; then
+           TIMEOUT_CMD="timeout 600" # 10 minutes max for generation
+       else
+           TIMEOUT_CMD=""
+       fi
+       
+       su -s /bin/bash terraria -c "$TIMEOUT_CMD /opt/terraria/TerrariaServer.bin.x86_64 -config /opt/terraria/serverconfig.txt < /opt/terraria/setup.in" >/dev/null 2>&1 || true
+       
+       echo "World generation attempt finished."
+       rm -f /opt/terraria/setup.in
+    fi
+
+    # Supervisor fallback for containers without systemd (unprivileged CTs)
+    # Only configure if Systemd is NOT present to avoid conflicts/redundancy.
+    if command -v supervisord >/dev/null 2>&1 && ! command -v systemctl >/dev/null 2>&1; then
+      echo "Configuring Supervisor..."
+      mkdir -p /etc/supervisor/conf.d
+      cat > /etc/supervisor/conf.d/terraria.conf <<SUPCONF
+[program:terraria]
+command=/opt/terraria/launch.sh
+directory=/opt/terraria
+user=terraria
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/var/log/terraria.log
+stdout_logfile_maxbytes=10MB
+stdout_logfile_backups=3
+SUPCONF
+      touch /var/log/terraria.log || true
+      chown terraria:terraria /var/log/terraria.log || true
+
+      # If systemd not available, install SysV/OpenRC wrapper to start supervisord on boot
+      if ! command -v systemctl >/dev/null 2>&1 && [ -d /etc/init.d ]; then
+        cat > /etc/init.d/supervisord <<'INIT'
+#!/sbin/openrc-run
+
+name="supervisord"
+description="Supervisor daemon"
+command="/usr/bin/supervisord"
+command_args="-c /etc/supervisor/supervisord.conf -n"
+command_background=true
+depend() {
+  need net
+}
+INIT
+        chmod +x /etc/init.d/supervisord || true
+        rc-update add supervisord default || true
+        rc-service supervisord restart || rc-service supervisord start || true
+      fi
+
+      # Ensure a crontab @reboot fallback to start supervisord if init doesn't
+      if command -v crontab >/dev/null 2>&1; then
+        F="@reboot /usr/bin/supervisord -c /etc/supervisor/supervisord.conf"
+        (crontab -l 2>/dev/null | grep -Fq "$F") || (crontab -l 2>/dev/null; echo "$F") | crontab - || true
+      fi
+      
+      # If systemd exists, enable supervisord unit if present
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable --now supervisor || true
+      fi
+    fi
+
+    # Service Setup (Universal: Systemd or OpenRC)
+    if command -v systemctl >/dev/null 2>&1; then
+        echo "Configuring Systemd service..."
+        # Cleanup potential Supervisor config to avoid confusion
+        rm -f /etc/supervisor/conf.d/terraria.conf
+
+        cat > /etc/systemd/system/terraria.service <<SERVICE
 [Unit]
 Description=Terraria Server
 After=network.target
@@ -419,47 +711,157 @@ After=network.target
 Type=simple
 User=terraria
 WorkingDirectory=/opt/terraria
-ExecStart=/opt/terraria/TerrariaServer -config /opt/terraria/serverconfig.txt
+ExecStart=/opt/terraria/launch.sh
 Restart=always
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 SERVICE
-    systemctl daemon-reload || true
-    systemctl enable --now terraria.service || true
-  else
-    # fallback: try to install and start supervisor
-    if command -v apk >/dev/null 2>&1; then
-      apk add --no-cache supervisor || true
-    elif command -v apt-get >/dev/null 2>&1; then
-      apt-get install -y supervisor || true
-    elif command -v dnf >/dev/null 2>&1; then
-      dnf -y install supervisor || true
+        systemctl daemon-reload
+        systemctl enable --now terraria
+        
+    elif [ -d /etc/init.d ]; then
+        echo "Configuring OpenRC service..."
+        # If supervisord is available, create a wrapper that uses supervisorctl
+        if command -v supervisorctl >/dev/null 2>&1; then
+            cat > /etc/init.d/terraria <<'SERVICE'
+#!/sbin/openrc-run
+
+name="Terraria (supervisor)"
+description="Terraria Dedicated Server (managed by supervisord)"
+depend() {
+  need net
+}
+
+start() {
+  ebegin "Starting terraria via supervisor"
+  /usr/bin/supervisorctl start terraria || true
+  eend $?
+}
+
+stop() {
+  ebegin "Stopping terraria via supervisor"
+  /usr/bin/supervisorctl stop terraria || true
+  eend $?
+}
+
+status() {
+  /usr/bin/supervisorctl status terraria || true
+}
+SERVICE
+            chmod +x /etc/init.d/terraria || true
+            rc-update add terraria default || true
+            rc-service terraria restart || rc-service terraria start || true
+        else
+            cat > /etc/init.d/terraria <<SERVICE
+#!/sbin/openrc-run
+
+name="Terraria Server"
+description="Terraria Dedicated Server"
+command="/opt/terraria/launch.sh"
+command_user="terraria:terraria"
+pidfile="/run/terraria.pid"
+directory="/opt/terraria"
+command_background=true
+
+depend() {
+  need net
+  use dns logger
+}
+SERVICE
+            chmod +x /etc/init.d/terraria
+            rc-update add terraria default
+            rc-service terraria restart || rc-service terraria start
+        fi
+    else
+        echo "Warning: No known init system (systemd/openrc) found. Server not auto-started."
     fi
+    
+    echo "Deployment Complete."
+EOF
 
-    mkdir -p /etc/supervisor.d || true
-    cat > /etc/supervisord.conf <<SUPERVISOR
-[unix_http_server]
-file=/var/run/supervisor.sock
+echo "--- Done. Access with: pct enter $CT_ID ---"
 
-[supervisord]
-childlogdir=/var/log
+# -----------------------------------------------------------------------------
+# 5. Host Configuration (Integrations)
+# -----------------------------------------------------------------------------
+echo "--- Configuring Host Integrations ---"
 
-[program:terraria]
-command=/opt/terraria/TerrariaServer -config /opt/terraria/serverconfig.txt
-directory=/opt/terraria
-user=terraria
-autostart=true
-autorestart=true
-stdout_logfile=/var/log/terraria.log
-stderr_logfile=/var/log/terraria.err
-SUPERVISOR
-
-    if command -v supervisord >/dev/null 2>&1; then
-      supervisord -c /etc/supervisord.conf || true
+# Setup Discord
+if [ "$ENABLE_DISCORD" -eq 1 ] && [ -n "$DISCORD_URL" ]; then
+    echo "Configuring Discord Webhook..."
+    CONF_FILE="$PROJECT_DIR/discord.conf"
+    if [ ! -f "$CONF_FILE" ]; then
+        echo "DISCORD_WEBHOOK_URL=\"$DISCORD_URL\"" > "$CONF_FILE"
+        chmod 600 "$CONF_FILE"
+        echo "Created discord.conf."
+    else
+        echo "discord.conf already exists. Not overwriting."
     fi
-  fi
-"
-echo "--- Terraria LXC Deployment Completed ---"
-echo "Access with: pct enter $CT_ID"
+fi
+
+# Setup Backup Cron
+if [ "$ENABLE_BACKUP" -eq 1 ]; then
+    BACKUP_SCRIPT="$PROJECT_DIR/scripts/backup_terraria.sh"
+    if [ -x "$BACKUP_SCRIPT" ]; then
+        echo "Configuring Automated Backup Cron Job..."
+        
+        # Determine Cron Schedule
+        CRON_EXPR=""
+        case "$BACKUP_SCHEDULE" in
+            "daily")  CRON_EXPR="0 4 * * *" ;;
+            "hourly") CRON_EXPR="0 * * * *" ;;
+            "6h")     CRON_EXPR="0 */6 * * *" ;;
+            "weekly") CRON_EXPR="0 4 * * 0" ;;
+            *)        CRON_EXPR="$BACKUP_SCHEDULE" ;; # Custom or passed directly
+        esac
+
+        # Command
+        CRON_CMD="$BACKUP_SCRIPT $CT_ID >> $PROJECT_DIR/backup.log 2>&1"
+        
+        # Check if job already exists (idempotency)
+        # We search for the script path AND the CT_ID followed by a space or end of line to avoid '100' matching '1000'
+        if crontab -l 2>/dev/null | grep -Eq "$BACKUP_SCRIPT $CT_ID([[:space:]]|$)"; then
+            echo "Cron job already exists for CT $CT_ID."
+        else
+            (crontab -l 2>/dev/null; echo "$CRON_EXPR $CRON_CMD") | crontab -
+            echo "Added backup job: '$CRON_EXPR'"
+        fi
+    else
+        echo "Warning: Backup script not executable or found at $BACKUP_SCRIPT"
+    fi
+fi
+
+# Setup Resource Monitor Cron
+if [ "$ENABLE_MONITOR" -eq 1 ]; then
+    MONITOR_SCRIPT="$PROJECT_DIR/scripts/monitor_health.sh"
+    if [ -x "$MONITOR_SCRIPT" ]; then
+        echo "Configuring Resource Monitor Cron Job (every 5 mins)..."
+        # Cron entry: */5 * * * * /path/to/monitor_health.sh CT_ID --alert >> /dev/null 2>&1
+        MONITOR_CMD="$MONITOR_SCRIPT $CT_ID --alert >> /dev/null 2>&1"
+        
+        if crontab -l 2>/dev/null | grep -Eq "$MONITOR_SCRIPT $CT_ID([[:space:]]|$)"; then
+            echo "Monitor job already exists for CT $CT_ID."
+        else
+            (crontab -l 2>/dev/null; echo "*/5 * * * * $MONITOR_CMD") | crontab -
+            echo "Added monitor job (every 5 mins)."
+        fi
+    else
+         echo "Warning: Monitor script not executable or found at $MONITOR_SCRIPT"
+    fi
+fi
+
+# Setup Discord Commander Bot
+if [ "$ENABLE_BOT" -eq 1 ]; then
+    BOT_SETUP_SCRIPT="$PROJECT_DIR/scripts/setup_bot.sh"
+    if [ -x "$BOT_SETUP_SCRIPT" ]; then
+        echo "Configuring Discord Commander Bot..."
+        # Usage: ./setup_bot.sh CT_ID TOKEN USER_ID
+        "$BOT_SETUP_SCRIPT" "$CT_ID" "$BOT_TOKEN" "$BOT_USER_ID"
+    else
+        echo "Warning: Bot setup script not executable or found at $BOT_SETUP_SCRIPT"
+    fi
+fi
+
+echo "--- All Operations Complete ---"
