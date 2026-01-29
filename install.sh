@@ -824,10 +824,10 @@ if [ "$ENABLE_BACKUP" -eq 1 ]; then
         
         # Check if job already exists (idempotency)
         # We search for the script path AND the CT_ID followed by a space or end of line to avoid '100' matching '1000'
-        if crontab -l 2>/dev/null | grep -Eq "$BACKUP_SCRIPT $CT_ID([[:space:]]|$)"; then
+        if (crontab -l 2>/dev/null || true) | grep -Eq "$BACKUP_SCRIPT $CT_ID([[:space:]]|$)"; then
             echo "Cron job already exists for CT $CT_ID."
         else
-            (crontab -l 2>/dev/null; echo "$CRON_EXPR $CRON_CMD") | crontab -
+            (crontab -l 2>/dev/null || true; echo "$CRON_EXPR $CRON_CMD") | crontab -
             echo "Added backup job: '$CRON_EXPR'"
         fi
     else
@@ -843,10 +843,10 @@ if [ "$ENABLE_MONITOR" -eq 1 ]; then
         # Cron entry: */5 * * * * /path/to/monitor_health.sh CT_ID --alert >> /dev/null 2>&1
         MONITOR_CMD="$MONITOR_SCRIPT $CT_ID --alert >> /dev/null 2>&1"
         
-        if crontab -l 2>/dev/null | grep -Eq "$MONITOR_SCRIPT $CT_ID([[:space:]]|$)"; then
+        if (crontab -l 2>/dev/null || true) | grep -Eq "$MONITOR_SCRIPT $CT_ID([[:space:]]|$)"; then
             echo "Monitor job already exists for CT $CT_ID."
         else
-            (crontab -l 2>/dev/null; echo "*/5 * * * * $MONITOR_CMD") | crontab -
+            (crontab -l 2>/dev/null || true; echo "*/5 * * * * $MONITOR_CMD") | crontab -
             echo "Added monitor job (every 5 mins)."
         fi
     else
