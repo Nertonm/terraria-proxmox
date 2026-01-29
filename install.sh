@@ -599,18 +599,27 @@ notify() {
     
     # Try to get local IP
     local ip=$(ip -4 a s eth0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1 || echo "Unknown")
+    
+    # Extract World Name and Port for the embed
+    local wname=$(grep "worldname=" "$CONF" | cut -d= -f2 | tr -d '\r')
+    local port=$(grep "port=" "$CONF" | cut -d= -f2 | tr -d '\r')
+    [ -z "$wname" ] && wname="Unknown"
+    [ -z "$port" ] && port="7777"
 
-    # JSON Payload (minimal)
+    # JSON Payload (Rich Embed)
     local json=$(cat <<J
 {
   "embeds": [{
     "title": "$title",
     "description": "$desc",
     "color": $color,
+    "thumbnail": { "url": "https://terraria.org/assets/terraria-logo.png" },
     "fields": [
-      { "name": "Server IP", "value": "$ip", "inline": true }
+      { "name": "Server IP", "value": "$ip", "inline": true },
+      { "name": "Port", "value": "$port", "inline": true },
+      { "name": "World", "value": "$wname", "inline": true }
     ],
-    "footer": { "text": "Terraria Server Status" },
+    "footer": { "text": "Terraria Server Status • Proxmox" },
     "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   }]
 }
@@ -705,10 +714,28 @@ notify "Server Starting" 3447003 "Terraria Server is booting up..."
 
 # Run the Server
 # Pipe output to capture start errors (like 'Choose World' menu)
-"$BIN" -config "$CONF" > "$DIR/server_output.log" 2>&1 &
-PID=$!
-wait $PID
-EXIT_CODE=$?
+# Run the Server in Tmux for Input Injection Capability
+# We use a unique session name based on the folder hash or fixed name 'terraria'
+TMUX_SESSION="terraria"
+
+# Ensure no stale session exists
+tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+
+# Start Tmux Detached
+tmux new-session -d -s "$TMUX_SESSION" "$BIN -config $CONF"
+
+# Setup Logging: Pipe the tmux output to the log file immediately
+tmux pipe-pane -o -t "$TMUX_SESSION" "cat >> $LOG_FILE"
+
+# Wait Loop: Monitor tmux session existence
+# We use a loop here because launch.sh must remain running for systemd/supervisor to track it.
+while tmux has-session -t "$TMUX_SESSION" 2>/dev/null; do
+    sleep 3
+done
+
+# When loop ends (server shutdown), capture exit code logic if possible
+# (Tmux masks the internal exit code, but we assume clean exit if session ends)
+EXIT_CODE=0
 
 # Capture last lines for diagnosis
 LAST_LOGS=$(tail -n 10 "$DIR/server_output.log" | sed 's/^[[:space:]]*//' | cut -c 1-200)
@@ -983,6 +1010,8 @@ Type=simple
 User=terraria
 WorkingDirectory=/opt/terraria
 ExecStart=/opt/terraria/launch.sh
+Environment="LANG=C.UTF-8"
+Environment="LC_ALL=C.UTF-8"
 Restart=always
 RestartSec=10
 
@@ -1005,6 +1034,8 @@ User=root
 WorkingDirectory=/opt/terraria
 Environment="DISCORD_BOT_TOKEN=$BOT_TOKEN"
 Environment="DISCORD_USER_ID=$BOT_USER_ID"
+Environment="LANG=C.UTF-8"
+Environment="LC_ALL=C.UTF-8"
 ExecStart=/opt/terraria/.bot_venv/bin/python /opt/terraria/discord_bot.py
 Restart=always
 RestartSec=10
@@ -1027,7 +1058,7 @@ directory=/opt/terraria
 user=root
 autostart=true
 autorestart=true
-environment=DISCORD_BOT_TOKEN="$BOT_TOKEN",DISCORD_USER_ID="$BOT_USER_ID"
+environment=DISCORD_BOT_TOKEN="$BOT_TOKEN",DISCORD_USER_ID="$BOT_USER_ID",LANG="C.UTF-8",LC_ALL="C.UTF-8"
 BOTSUP
             supervisorctl update || true
         fi
