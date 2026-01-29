@@ -400,20 +400,48 @@ else
     BOT_CODE=""
 fi
 
-# Check for local file priority
+# --- SERVER BINARY CACHING SYSTEM ---
+# Determine local cache filename
+CACHE_FILE="$PROJECT_DIR/terraria-server-$TERRARIA_VERSION.zip"
+TARGET_URL="https://terraria.org/api/download/pc-dedicated-server/terraria-server-$TERRARIA_VERSION.zip"
+
+echo "Checking for Terraria Server package..."
+
+# 1. Check if user provided a custom zip path
 if [ -n "${LOCAL_ZIP_PATH:-}" ]; then
     if [ ! -f "$LOCAL_ZIP_PATH" ]; then
-        echo "Error: Local zip file '$LOCAL_ZIP_PATH' not found."
+        echo "Error: Custom zip file '$LOCAL_ZIP_PATH' not found."
         exit 1
     fi
-    echo "Pushing local zip to container..."
-    pct push "$CT_ID" "$LOCAL_ZIP_PATH" "/tmp/terraria_local.zip"
-elif [ -f "$PROJECT_DIR/terraria-server-$TERRARIA_VERSION.zip" ]; then
-    echo "Found local cache: terraria-server-$TERRARIA_VERSION.zip. Using it."
-    pct push "$CT_ID" "$PROJECT_DIR/terraria-server-$TERRARIA_VERSION.zip" "/tmp/terraria_local.zip"
+    SOURCE_ZIP="$LOCAL_ZIP_PATH"
+    echo "Using custom local package: $SOURCE_ZIP"
+
+# 2. Check if we already have it cached in project dir
+elif [ -f "$CACHE_FILE" ]; then
+    SOURCE_ZIP="$CACHE_FILE"
+    echo "Using cached package: $SOURCE_ZIP"
+
+# 3. Not found locally, download to Host Cache
+else
+    echo "Package not found locally. Downloading to cache..."
+    if command -v wget >/dev/null 2>&1; then
+        wget -q --show-progress -O "$CACHE_FILE" "$TARGET_URL" || rm -f "$CACHE_FILE"
+    else
+        curl -L -o "$CACHE_FILE" "$TARGET_URL" || rm -f "$CACHE_FILE"
+    fi
+    
+    if [ ! -f "$CACHE_FILE" ]; then
+        echo "Error: Failed to download Terraria server. Check internet connection."
+        exit 1
+    fi
+    SOURCE_ZIP="$CACHE_FILE"
+    echo "Download complete. Cached as: $CACHE_FILE"
 fi
 
-# We export variables to the 'env' command so they are available in the shell spawned by 'pct exec'.
+# 4. Push to Container
+echo "Pushing game files to container..."
+pct push "$CT_ID" "$SOURCE_ZIP" "/tmp/terraria_installer.zip"
+
 pct exec "$CT_ID" -- env \
   TERRARIA_VERSION="$TERRARIA_VERSION" \
   SERVER_PORT="$SERVER_PORT" \
@@ -593,11 +621,28 @@ SETUP
         if [ -s "$WORLD_PATH" ]; then
              notify "Auto-Repair Success" 3066993 "World generated successfully. Starting server..."
         else
-             LAST_LOG=$(tail -n 3 "$DIR/gen.log")
+             # Capture more logs and file listing for debug
+             LAST_LOG=$(tail -n 10 "$DIR/gen.log")
+             ls -la "$(dirname "$WORLD_PATH")" >> "$DIR/gen_falha_debug.txt" 2>&1
              notify "Auto-Repair Failed" 15158332 "Could not generate world. Log: $LAST_LOG"
              # Don't exit yet, let the server try and fail visibly
         fi
     fi
+fi
+
+# Ensure Permissions (Critical fix for access denied errors)
+chown -R terraria:terraria "$DIR" "$(dirname "$WORLD_PATH")" 2>/dev/null || true
+
+# CRITICAL: Ensure 'world=' config exists to prevent interactive menu loop
+if ! grep -qE "^world=" "$CONF"; then
+    echo "Config Warning: 'world=' directive missing in $CONF. Injecting default..."
+    if [ -n "$WORLD_PATH" ]; then
+        echo "world=$WORLD_PATH" >> "$CONF"
+    else
+        # Fallback if variable somehow empty
+        echo "world=$DIR/Worlds/Terraria.wld" >> "$CONF"
+    fi
+    chown terraria:terraria "$CONF"
 fi
 
 notify "Server Starting" 3447003 "Terraria Server is booting up..."
@@ -616,14 +661,38 @@ LAST_LOGS=$(tail -n 10 "$DIR/server_output.log" | sed 's/^[[:space:]]*//' | cut 
 if [ $EXIT_CODE -eq 0 ]; then
     # If exit 0, check if it was a "Menu Exit" (Failure to load)
     if echo "$LAST_LOGS" | grep -qiE "(choose world|select world|enter world name)"; then
-        notify "Boot Error" 15158332 "Server failed to load world and dropped to menu. Check config/paths. Logs: $LAST_LOGS"
-        # Force error exit code to stop systemd from thinking it was a success
+        notify "Boot Error: Missing World" 15158332 "Server dropped to menu. It cannot find the configured world file.\n\n**Action:** Check paths in 'serverconfig.txt' or run restore."
         exit 1
     else
         notify "Server Stopped" 15158332 "Server shut down normally."
     fi
 else
-    notify "Server Crashed" 15158332 "Exit Code: $EXIT_CODE. Logs: $LAST_LOGS"
+    # Analyze Crash Reason
+    ERROR_TITLE="Server Crashed"
+    ERROR_DESC="Exit Code: $EXIT_CODE.\n\n**Logs:**\n\`\`\`$LAST_LOGS\`\`\`"
+    
+    # 1. Port In Use
+    if echo "$LAST_LOGS" | grep -q "Address already in use"; then
+        ERROR_TITLE="Network Error"
+        ERROR_DESC="Port 7777 is already in use.\n\n**Hint:** Is another instance running? Check 'pct exec $CT_ID -- ss -lptn'."
+    
+    # 2. Corrupted World / Read Error
+    elif echo "$LAST_LOGS" | grep -qiE "(LoadWorld|ReadAllBytes|System.IO.IOException)"; then
+        ERROR_TITLE="World Corruption Detected"
+        ERROR_DESC="Failed to load world file. It may be corrupted or have wrong permissions.\n\n**Action:** Restore from backup immediately."
+        
+    # 3. Out of Memory
+    elif echo "$LAST_LOGS" | grep -qi "OutOfMemory"; then
+        ERROR_TITLE="Out of Memory"
+        ERROR_DESC="Server ran out of RAM.\n\n**Action:** Increase container memory via Proxmox UI."
+        
+    # 4. Bad Config
+    elif echo "$LAST_LOGS" | grep -qi "serverconfig.txt"; then
+        ERROR_TITLE="Configuration Error"
+        ERROR_DESC="Error reading 'serverconfig.txt'. Check for typos or invalid parameters."
+    fi
+
+    notify "$ERROR_TITLE" 15158332 "$ERROR_DESC"
 fi
 
 sleep 2
@@ -652,23 +721,18 @@ LAUNCH
     ZIP_FILE="terraria-server.zip"
     URL="https://terraria.org/api/download/pc-dedicated-server/terraria-server-$TERRARIA_VERSION.zip"
     
-    # Download or Copy Configuration
+    # Install from Pushed Zip
     ZIP_FILE="terraria-server.zip"
     
-    if [ -f "/tmp/terraria_local.zip" ]; then
-        echo "Using local server package..."
-        mv /tmp/terraria_local.zip "$ZIP_FILE"
+    if [ -f "/tmp/terraria_installer.zip" ]; then
+        echo "Installer package found. Extracting..."
+        mv /tmp/terraria_installer.zip "$ZIP_FILE"
     else
-        URL="https://terraria.org/api/download/pc-dedicated-server/terraria-server-$TERRARIA_VERSION.zip"
-        echo "Downloading Terraria Server $TERRARIA_VERSION..."
-        if command -v wget >/dev/null 2>&1; then
-            wget -q -O "$ZIP_FILE" "$URL"
-        else
-            curl -L -o "$ZIP_FILE" "$URL"
-        fi
+        # Fallback (should not happen with new logic, but safe to keep)
+        echo "Error: Installer package /tmp/terraria_installer.zip missing!"
+        exit 1
     fi
     
-    echo "Extracting..."
     # Check for unzip availability
     if ! command -v unzip >/dev/null 2>&1; then
         echo "Error: unzip not found."
@@ -714,16 +778,27 @@ LAUNCH
     fi
 
     cat > serverconfig.txt <<CONFIG
+# Terraria Server Configuration
+# Generated by Terraria-Proxmox Manager
+
+# Network
 port=$SERVER_PORT
 maxplayers=$MAX_PLAYERS
+upnp=0
+
+# World Settings
 worldname=$WORLD_NAME
 autocreate=$AUTOCREATE
 seed=$SEED
-difficulty=$DIFFICULTY
+difficulty=$DIFFICULTY  # 0=Classic, 1=Expert, 2=Master, 3=Journey
+
+# Security & Access
 password=$PASSWORD
-motd=$MOTD
+motd=${MOTD:-"Welcome to Terraria Server!"}
 secure=$SECURE
-upnp=0
+
+# World File Path (Critical for automation)
+# world=/path/to/world.wld (Populated automatically by launch script if missing)
 CONFIG
     chown terraria:terraria serverconfig.txt
 

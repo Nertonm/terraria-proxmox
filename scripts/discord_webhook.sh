@@ -107,6 +107,35 @@ PAYLOAD=$(cat <<JSON
 JSON
 )
 
+# --- RATE LIMITING (Anti-Spam) ---
+# Prevent sending identical messages within 60 seconds
+# Calculate hash of title + description
+if command -v md5sum >/dev/null 2>&1; then
+    MSG_HASH=$(echo "${TITLE}${DESCRIPTION}" | md5sum | awk '{print $1}')
+else
+    # Fallback if md5sum missing (e.g. minimal alpine)
+    MSG_HASH="nohash"
+fi
+
+LOCK_FILE="/tmp/discord_lock_${MSG_HASH}"
+
+if [ "$MSG_HASH" != "nohash" ] && [ -f "$LOCK_FILE" ]; then
+    # Check age of lock file
+    NOW=$(date +%s)
+    LAST_SENT=$(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0)
+    DIFF=$((NOW - LAST_SENT))
+    
+    # 60 Second Cooldown for identical messages
+    if [ "$DIFF" -lt 60 ]; then
+        # Too soon, skip sending
+        # echo "Rate limit: Skipping duplicate notification." >&2
+        exit 0
+    fi
+fi
+
+# Update Lock File
+touch "$LOCK_FILE" 2>/dev/null || true
+
 # Send Request
 curl -s -S -H "Content-Type: application/json" \
      -X POST \
