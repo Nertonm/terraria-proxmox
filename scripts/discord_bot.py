@@ -21,7 +21,16 @@ HAS_PCT = shutil.which('pct') is not None
 SERVER_DIR = "/opt/terraria"
 LOG_FILE = f"{SERVER_DIR}/server_output.log"
 CONFIG_FILE = f"{SERVER_DIR}/serverconfig.txt"
+CONFIG_FILE = f"{SERVER_DIR}/serverconfig.txt"
 CHANNEL_ID_FILE = f"{SERVER_DIR}/.discord_channel_id"
+
+# Detect Service Manager
+SERVICE_CMD = "systemctl" # default
+if shutil.which('supervisorctl'):
+    SERVICE_CMD = "supervisorctl"
+elif not shutil.which('systemctl'):
+     # Fallback if neither found (unlikely in this setup, but possible in raw docker)
+     print("Warning: Neither systemctl nor supervisorctl found.")
 
 # Setup Bot
 intents = discord.Intents.default()
@@ -221,22 +230,64 @@ async def log_monitor_task():
                          await channel.send(f"💬 **{name}**: {msg}")
 
             # Death Messages (Heuristic)
-            # "Name was slain by...", "Name fell...", "Name drowned..."
             elif any(x in line for x in [" was slain by ", " fell ", " drowned ", " burned ", " died "]):
-                 # Basic filter to ensure it's a player death event
-                 # Usually starts with PlayerName ...
-                 # We avoid lines starting with IP like "192.168... was slain" (unlikely)
                  await channel.send(f"💀 *{line}*")
+
+            # World Generation Progress (Heuristic: "10.0% - Step Name")
+            elif "% - " in line:
+                 # Rate limit updates to avoid API spam (Discord limits edits)
+                 now = datetime.datetime.now().timestamp()
+                 
+                 # Initialize state if needed (attach to bot to persist across loop iterations)
+                 if not hasattr(bot, 'gen_progress_msg'): bot.gen_progress_msg = None
+                 if not hasattr(bot, 'gen_last_update'): bot.gen_last_update = 0
+                 
+                 # Pattern: 19.3% - Adding more grass
+                 # Clean up the line to be a nice status
+                 status_text = line.strip()
+                 
+                 # Update immediately if first time, else check throttle (2.5s)
+                 if bot.gen_progress_msg is None:
+                     embed = discord.Embed(title="🌍 Generating World - Auto-Repair", description=f"`{status_text}`", color=discord.Color.gold())
+                     bot.gen_progress_msg = await channel.send(embed=embed)
+                     bot.gen_last_update = now
+                 elif now - bot.gen_last_update > 2.5:
+                     try:
+                         embed = discord.Embed(title="🌍 Generating World - Auto-Repair", description=f"`{status_text}`", color=discord.Color.gold())
+                         await bot.gen_progress_msg.edit(embed=embed)
+                         bot.gen_last_update = now
+                     except discord.NotFound:
+                         # Message deleted, recreate
+                         bot.gen_progress_msg = await channel.send(embed=embed)
+            
+            # Detect Generation Complete (or Server Start) to cleanup
+            if bot.get_channel(LOG_CHANNEL_ID) and hasattr(bot, 'gen_progress_msg') and bot.gen_progress_msg:
+                 if "Listening on port" in line or "Server shut down" in line or "Setting up" in line:
+                     try:
+                         # clear the progress message
+                         await bot.gen_progress_msg.delete()
+                     except: pass
+                     bot.gen_progress_msg = None
                     
         except Exception as e:
             print(f"Log monitor error: {e}")
             await asyncio.sleep(1)
 
 async def is_authorized(ctx):
-    if ALLOWED_USER_ID != 0 and ctx.author.id != ALLOWED_USER_ID:
-        await ctx.send("⛔ **Unauthorized Access**")
-        return False
-    return True
+    # Public Commands (whitelist)
+    if ctx.command and ctx.command.name in ['ping', 'status', 'help']:
+        return True
+
+    # 1. Hardcoded Owner
+    if ALLOWED_USER_ID != 0 and ctx.author.id == ALLOWED_USER_ID:
+        return True
+    
+    # 2. Server Administrators
+    if ctx.guild and ctx.author.guild_permissions.administrator:
+        return True
+        
+    await ctx.send("⛔ **Acesso Negado** (Requer permissão de Administrador)")
+    return False
 
 async def update_status_task():
     """Background task to update bot status with player count or server state."""
@@ -323,6 +374,7 @@ async def command(ctx, *, cmd_text: str):
              # or just show last few lines. Suffixing command with unique ID is hard in tmux.
              # We will show the last 6 lines.
              logs = await run_shell_async(f"tail -n 6 {LOG_FILE}")
+             if not logs: logs = "(No output captured)"
              await ctx.send(f"✅ **Enviado:** `{cmd_text}`\n**Console Output:**\n```bash\n{logs}\n```")
         except:
              await ctx.send(f"✅ **Enviado:** `{cmd_text}` (Logs indisponíveis)")
@@ -396,6 +448,7 @@ async def ping(ctx):
 @bot.command()
 async def status(ctx):
     """Shows comprehensive server status."""
+    # Status is public
     await send_status_embed(ctx)
 
 async def send_status_embed(ctx):
@@ -451,17 +504,17 @@ class ServerControlView(discord.ui.View):
     @discord.ui.button(label="Iniciar", style=discord.ButtonStyle.success, emoji="▶️")
     async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("🚀 Iniciando servidor...", ephemeral=True)
-        await run_shell_async("systemctl start terraria")
+        await run_shell_async(f"{SERVICE_CMD} start terraria")
         
     @discord.ui.button(label="Reiniciar", style=discord.ButtonStyle.primary, emoji="🔄")
     async def restart_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("🔄 Reiniciando servidor...", ephemeral=True)
-        await run_shell_async("systemctl restart terraria")
+        await run_shell_async(f"{SERVICE_CMD} restart terraria")
 
     @discord.ui.button(label="Parar", style=discord.ButtonStyle.danger, emoji="🛑")
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("🛑 Parando servidor...", ephemeral=True)
-        await run_shell_async("systemctl stop terraria")
+        await run_shell_async(f"{SERVICE_CMD} stop terraria")
         
     @discord.ui.button(label="Status", style=discord.ButtonStyle.secondary, emoji="📊")
     async def status_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -530,19 +583,19 @@ async def wait_and_verify(ctx, action, verify_running=True):
 @bot.command()
 async def start(ctx):
     if not await is_authorized(ctx): return
-    await run_shell_async("systemctl start terraria")
+    await run_shell_async(f"{SERVICE_CMD} start terraria")
     await wait_and_verify(ctx, "Start", verify_running=True)
 
 @bot.command()
 async def stop(ctx):
     if not await is_authorized(ctx): return
-    await run_shell_async("systemctl stop terraria")
+    await run_shell_async(f"{SERVICE_CMD} stop terraria")
     await wait_and_verify(ctx, "Stop", verify_running=False)
 
 @bot.command()
 async def restart(ctx):
     if not await is_authorized(ctx): return
-    await run_shell_async("systemctl restart terraria")
+    await run_shell_async(f"{SERVICE_CMD} restart terraria")
     await wait_and_verify(ctx, "Restart", verify_running=True)
 
 # Graceful Shutdown
@@ -659,7 +712,7 @@ async def reboot(ctx, minutes: int = 5):
     await asyncio.sleep(2)
     
     await ctx.send("🔄 **Reiniciando agora...**")
-    await run_shell_async("systemctl restart terraria")
+    await run_shell_async(f"{SERVICE_CMD} restart terraria")
     await wait_and_verify(ctx, "Restart", verify_running=True)
 
 if __name__ == "__main__":

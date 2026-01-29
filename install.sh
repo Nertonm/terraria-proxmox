@@ -95,6 +95,7 @@ Options:
   --npcstream N            Reduce enemy skipping (default: 60)
   --journey-permission N   Journey Mode Defaults (0=Locked, 1=Host, 2=All)
   --autocreate             Enable auto-creation of world if missing
+  --world-file FILE        Import an existing .wld file
   --enable-backup          Enable automated backups
   --backup-schedule TYPE   Schedule: daily, hourly, 6h, weekly, or "cron expr" (def: daily)
   --enable-monitor         Enable resource monitoring (RAM usage > 90%)
@@ -143,6 +144,7 @@ while [ "$#" -gt 0 ]; do
     --enable-backup) ENABLE_BACKUP=1; shift ;;
     --backup-schedule) ENABLE_BACKUP=1; BACKUP_SCHEDULE="$2"; shift 2 ;;
     --enable-monitor) ENABLE_MONITOR=1; shift ;;
+    --world-file) LOCAL_WORLD_PATH="$2"; shift 2 ;;
     --discord-url) ENABLE_DISCORD=1; DISCORD_URL="$2"; shift 2 ;;
     --enable-bot) ENABLE_BOT=1; shift ;;
     --bot-token) ENABLE_BOT=1; BOT_TOKEN="$2"; shift 2 ;;
@@ -186,24 +188,41 @@ if [ "$ARGS_PROVIDED" -eq 0 ] && [ -t 0 ]; then
   read -rp "Max Players [$MAX_PLAYERS]: " input_players
   MAX_PLAYERS=${input_players:-$MAX_PLAYERS}
 
-  read -rp "World Name [$WORLD_NAME]: " input_wname
-  WORLD_NAME=${input_wname:-$WORLD_NAME}
-  
-  read -rp "World Size (1=small, 2=medium, 3=large) [$WORLD_SIZE]: " input_size
-  WORLD_SIZE=${input_size:-$WORLD_SIZE}
+  read -rp "Import an existing world file (.wld)? (y/N) [N]: " input_import
+  if [[ "$input_import" =~ ^[Yy] ]]; then
+      read -rp "Path to .wld file: " input_path
+      if [ -f "$input_path" ]; then
+          LOCAL_WORLD_PATH="$input_path"
+          # Extract name without extension for config consistency
+          WORLD_NAME=$(basename "$input_path" .wld)
+          echo "Using imported world: $WORLD_NAME"
+          # Skip generation questions
+          SKIP_GEN_OPTS=1
+      else
+          echo "File not found. Proceeding with standard setup."
+          SKIP_GEN_OPTS=0
+      fi
+  else
+      SKIP_GEN_OPTS=0
+  fi
 
-  read -rp "Difficulty (0=classic, 1=expert, 2=master, 3=journey) [$DIFFICULTY]: " input_diff
-  DIFFICULTY=${input_diff:-$DIFFICULTY}
+  if [ "$SKIP_GEN_OPTS" -eq 0 ]; then
+      read -rp "World Name [$WORLD_NAME]: " input_wname
+      WORLD_NAME=${input_wname:-$WORLD_NAME}
+      
+      read -rp "World Size (1=small, 2=medium, 3=large) [$WORLD_SIZE]: " input_size
+      WORLD_SIZE=${input_size:-$WORLD_SIZE}
 
-  read -rp "World Evil (1=Random, 2=Corrupt, 3=Crimson) [$WORLD_EVIL]: " input_evil
-  WORLD_EVIL=${input_evil:-$WORLD_EVIL}
+      read -rp "Difficulty (0=classic, 1=expert, 2=master, 3=journey) [$DIFFICULTY]: " input_diff
+      DIFFICULTY=${input_diff:-$DIFFICULTY}
 
-  read -rp "Seed (optional): " input_seed
-  SEED=${input_seed:-$SEED}
-  
-  read -rp "Secret Seed (optional, e.g. 'not the bees'): " input_secret
-  if [ -n "$input_secret" ]; then
-    SEED="$input_secret"
+      read -rp "Seed (optional): " input_seed
+      SEED=${input_seed:-$SEED}
+      
+      read -rp "Secret Seed (optional, e.g. 'not the bees'): " input_secret
+      if [ -n "$input_secret" ]; then
+        SEED="$input_secret"
+      fi
   fi
 
   read -rp "Password (empty for none): " input_pass
@@ -274,10 +293,7 @@ if [[ ! "$DIFFICULTY" =~ ^[0-3]$ ]]; then
     echo "Error: Difficulty must be 0 (classic), 1 (expert), 2 (master), or 3 (journey)." >&2
     exit 1
 fi
-if [[ ! "$WORLD_EVIL" =~ ^[1-3]$ ]]; then
-    echo "Error: World evil must be 1 (random), 2 (corrupt), or 3 (crimson)." >&2
-    exit 1
-fi
+
 
 # If --autocreate flag was used, set AUTOCREATE to the chosen WORLD_SIZE
 if [ "${AUTOCREATE_FLAG:-0}" -eq 1 ]; then
@@ -473,6 +489,17 @@ fi
 echo "Pushing game files to container..."
 pct push "$CT_ID" "$SOURCE_ZIP" "/tmp/terraria_installer.zip"
 
+UPLOADED_WORLD_NAME=""
+if [ -n "${LOCAL_WORLD_PATH:-}" ]; then
+    if [ ! -f "$LOCAL_WORLD_PATH" ]; then
+        echo "Error: World file '$LOCAL_WORLD_PATH' not found."
+        exit 1
+    fi
+    UPLOADED_WORLD_NAME=$(basename "$LOCAL_WORLD_PATH")
+    echo "Pushing world file '$UPLOADED_WORLD_NAME'..."
+    pct push "$CT_ID" "$LOCAL_WORLD_PATH" "/tmp/$UPLOADED_WORLD_NAME"
+fi
+
 pct exec "$CT_ID" -- env \
   TERRARIA_VERSION="$TERRARIA_VERSION" \
   SERVER_PORT="$SERVER_PORT" \
@@ -487,6 +514,7 @@ pct exec "$CT_ID" -- env \
   MOTD="$MOTD" \
   SECURE="$SECURE" \
   AUTOCREATE="$AUTOCREATE" \
+  UPLOADED_WORLD_NAME="$UPLOADED_WORLD_NAME" \
   DISCORD_URL="$DISCORD_URL" \
   BOT_TOKEN="$BOT_TOKEN" \
   BOT_USER_ID="$BOT_USER_ID" \
@@ -515,10 +543,10 @@ pct exec "$CT_ID" -- env \
     elif command -v apt-get >/dev/null 2>&1; then
       echo "Debian/Ubuntu detected."
       apt-get update
-      apt-get install -y wget unzip tmux libicu-dev supervisor curl ca-certificates iproute2 python3 python3-venv python3-pip
+      apt-get install -y wget unzip tmux libicu-dev supervisor curl ca-certificates iproute2 python3 python3-venv python3-pip findutils
     elif command -v dnf >/dev/null 2>&1; then
         echo "Fedora/RHEL detected."
-        dnf install -y wget unzip tmux libicu curl ca-certificates iproute python3 python3-pip
+        dnf install -y wget unzip tmux libicu curl ca-certificates iproute python3 python3-pip findutils
     else
         echo "Error: No supported package manager found (apk, apt, dnf)."
         exit 1
@@ -568,6 +596,14 @@ pct exec "$CT_ID" -- env \
        chown terraria:terraria /opt/terraria/.discord_url
     fi
 
+    # Save Bot Credentials
+    if [ -n "$BOT_TOKEN" ]; then
+       echo "export DISCORD_BOT_TOKEN='$BOT_TOKEN'" > /opt/terraria/.bot_env
+       echo "export DISCORD_USER_ID='$BOT_USER_ID'" >> /opt/terraria/.bot_env
+       chmod 600 /opt/terraria/.bot_env
+       chown terraria:terraria /opt/terraria/.bot_env
+    fi
+
     # Create the Launch Wrapper (handles notifications)
     cat > /opt/terraria/launch.sh <<'LAUNCH'
 #!/bin/bash
@@ -576,7 +612,7 @@ DIR="/opt/terraria"
 BIN="$DIR/TerrariaServer.bin.x86_64"
 CONF="$DIR/serverconfig.txt"
 URL_FILE="$DIR/.discord_url"
-LOG_FILE="/var/log/terraria.log"
+LOG_FILE="$DIR/server_output.log"
 
 # Escape JSON strings
 json_escape() {
@@ -631,67 +667,20 @@ J
 # Sanity Check: World Existence
 # Read world path, handling potential whitespace around '='
 WORLD_PATH=$(grep "^world=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
+WORLD_DIR=$(dirname "$WORLD_PATH")
+mkdir -p "$WORLD_DIR"
 
-if [ -n "$WORLD_PATH" ]; then
     # 1. Check for 0-byte corrupted worlds
     if [ -f "$WORLD_PATH" ] && [ ! -s "$WORLD_PATH" ]; then
         echo "Warning: World file exists but is empty (corrupted). Deleting to allow regen."
         rm -f "$WORLD_PATH"
     fi
 
-    # 2. Auto-Repair if missing
+    # Native Auto-Create Handling
+    # The server handles generation automatically via 'autocreate=' in config.
+    # We just ensure the directory exists and permissions are right.
     if [ ! -f "$WORLD_PATH" ]; then
-        echo "Warning: World file configured ($WORLD_PATH) not found."
-        notify "Auto-Repair" 16776960 "World file missing. Attempting emergency generation..."
-        
-        # Extract config values for generation
-        W_NAME=$(grep "^worldname=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
-        [ -z "$W_NAME" ] && W_NAME="TerrariaRequest"
-
-        # Try to match difficulty (Config 0-3)
-        W_DIFF_C=$(grep "^difficulty=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
-        [ -z "$W_DIFF_C" ] && W_DIFF_C=0
-        
-        # Try to match seed
-        W_SEED_C=$(grep "^seed=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
-        
-        # Try to match worldevil
-        W_EVIL_C=$(grep "^worldevil=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
-
-        # Try to match size (Config autocreate=1,2,3) - Default to 2 (Medium)
-        W_SIZE_C=$(grep "^autocreate=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
-        if [[ "$W_SIZE_C" =~ ^[1-3]$ ]]; then
-            W_SIZE="$W_SIZE_C"
-        else
-            W_SIZE="2"
-        fi
-        
-        echo "Running generation via CLI params..."
-        # Construct command array to safely handle optional arguments
-        CMD_ARGS=("$BIN" "-config" "$CONF" "-autocreate" "$W_SIZE" "-worldname" "$W_NAME" "-difficulty" "$W_DIFF_C")
-        
-        if [ -n "$W_SEED_C" ]; then
-            CMD_ARGS+=("-seed" "$W_SEED_C")
-        fi
-        
-        if [ -n "$W_EVIL_C" ]; then
-             CMD_ARGS+=("-worldevil" "$W_EVIL_C")
-        fi
-        
-        # Execute generation
-        "${CMD_ARGS[@]}" > "$DIR/gen.log" 2>&1
-            
-        # Check result
-        
-        if [ -s "$WORLD_PATH" ]; then
-             notify "Auto-Repair Success" 3066993 "World generated successfully. Starting server..."
-        else
-             # Capture more logs and file listing for debug
-             LAST_LOG=$(tail -n 10 "$DIR/gen.log")
-             ls -la "$(dirname "$WORLD_PATH")" >> "$DIR/gen_falha_debug.txt" 2>&1
-             notify "Auto-Repair Failed" 15158332 "Could not generate world. Log: $LAST_LOG"
-             # Don't exit yet, let the server try and fail visibly
-        fi
+         notify "First Run" 3447003 "World file not found. Server will generate it automatically (this may take a minute)..."
     fi
 fi
 
@@ -721,8 +710,28 @@ TMUX_SESSION="terraria"
 # Ensure no stale session exists
 tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
-# Start Tmux Detached
-tmux new-session -d -s "$TMUX_SESSION" "$BIN -config $CONF"
+
+    echo "Launching Server..."
+    # Start Tmux Detached
+    tmux new-session -d -s "$TMUX_SESSION" "$BIN -config $CONF"
+
+    # Start Discord Bot (Background)
+    BOT_PID=""
+    if [ -f "$DIR/.bot_env" ] && [ -f "$DIR/discord_bot.py" ]; then
+        echo "Starting Discord Bot..."
+        # Subshell to source env without polluting parent
+        (
+            source "$DIR/.bot_env"
+            # Run using venv python, piping log
+            nohup "$DIR/.bot_venv/bin/python3" "$DIR/discord_bot.py" > "$DIR/bot_output.log" 2>&1 &
+            echo $! > "$DIR/bot.pid"
+        )
+        # Read PID back (slightly hacky but works for subshell async)
+        sleep 1
+        if [ -f "$DIR/bot.pid" ]; then
+            BOT_PID=$(cat "$DIR/bot.pid")
+        fi
+    fi
 
 # Setup Logging: Pipe the tmux output to the log file immediately
 tmux pipe-pane -o -t "$TMUX_SESSION" "cat >> $LOG_FILE"
@@ -732,6 +741,12 @@ tmux pipe-pane -o -t "$TMUX_SESSION" "cat >> $LOG_FILE"
 while tmux has-session -t "$TMUX_SESSION" 2>/dev/null; do
     sleep 3
 done
+
+# Cleanup Bot
+if [ -n "$BOT_PID" ]; then
+    echo "Stopping Bot (PID $BOT_PID)..."
+    kill "$BOT_PID" 2>/dev/null || true
+fi
 
 # When loop ends (server shutdown), capture exit code logic if possible
 # (Tmux masks the internal exit code, but we assume clean exit if session ends)
@@ -852,9 +867,27 @@ LAUNCH
     
     chown -R terraria:terraria /opt/terraria
     
-    # --- Prepare World Paths (Moved up for Config Generation) ---
+    # --- Prepare World Paths ---
     TERRARIA_HOME=${TERRARIA_HOME:-/home/terraria}
-    WORLD_FILE="$TERRARIA_HOME/.local/share/Terraria/Worlds/${WORLD_NAME}.wld"
+    
+    # Handle Uploaded World
+    if [ -n "$UPLOADED_WORLD_NAME" ] && [ -f "/tmp/$UPLOADED_WORLD_NAME" ]; then
+         echo "Installing uploaded world: $UPLOADED_WORLD_NAME"
+         TARGET_DIR="$TERRARIA_HOME/.local/share/Terraria/Worlds"
+         mkdir -p "$TARGET_DIR"
+         mv "/tmp/$UPLOADED_WORLD_NAME" "$TARGET_DIR/$UPLOADED_WORLD_NAME"
+         chown terraria:terraria "$TARGET_DIR/$UPLOADED_WORLD_NAME"
+         
+         # Update identifiers
+         WORLD_FILE="$TARGET_DIR/$UPLOADED_WORLD_NAME"
+         WORLD_NAME=$(basename "$UPLOADED_WORLD_NAME" .wld)
+         
+         # Disable auto-create in config logic as we have a world
+         AUTOCREATE="" 
+    else
+         WORLD_FILE="$TERRARIA_HOME/.local/share/Terraria/Worlds/${WORLD_NAME}.wld"
+    fi
+    
     WORLD_DIR="$(dirname "$WORLD_FILE")"
 
     # Ensure directories exist
@@ -880,41 +913,90 @@ LAUNCH
     fi
     
     AUTOCREATE_LINE=""
-    # Only adding autocreate if it is 1, 2, or 3. 0 means disabled.
-    if [[ "$AUTOCREATE" =~ ^[1-3]$ ]]; then
-        AUTOCREATE_LINE="autocreate=$AUTOCREATE"
+    # Always include autocreate derived from WORLD_SIZE to ensure:
+    # 1. launch.sh Auto-Repair knows the intended size if the world is missing.
+    # 2. Server binary has a fallback auto-create configuration.
+    if [[ "$WORLD_SIZE" =~ ^[1-3]$ ]]; then
+        AUTOCREATE_LINE="autocreate=$WORLD_SIZE"
     fi
 
-    cat > serverconfig.txt <<CONFIG
-# Terraria Server Configuration
-# Generated by Terraria-Proxmox Manager
+cat > serverconfig.txt <<CONFIG
+#this is an example config file for TerrariaServer.exe
+#use the command 'TerrariaServer.exe -config serverconfig.txt' to use this configuration or run start-server.bat
+#please report crashes by emailing crashlog.txt to support@terraria.org
 
-# --- Network ---
-port=$SERVER_PORT
-maxplayers=$MAX_PLAYERS
-upnp=0
-priority=1
+#the following is a list of available command line parameters:
 
-# --- World Settings ---
+#-config <config file>				            Specifies the configuration file to use.
+#-port <port number>				              Specifies the port to listen on.
+#-players <number> / -maxplayers <number>	Sets the max number of players
+#-pass <password> / -password <password>		Sets the server password
+#-world <world file>					Load a world and automatically start the server.
+#-autocreate <#>					Creates a world if none is found in the path specified by -world. World size is specified by: 1(small), 2(medium), and 3(large).
+#-banlist <path>					Specifies the location of the banlist. Defaults to "banlist.txt" in the working directory.
+#-worldname <world name>             			Sets the name of the world when using -autocreate.
+#-secure						Adds addition cheat protection to the server.
+#-noupnp						Disables automatic port forwarding
+#-steam							Enables Steam Support
+#-lobby <friends> or <private>				Allows friends to join the server or sets it to private if Steam is enabled
+#-ip <ip address>					Sets the IP address for the server to listen on
+#-forcepriority <priority>				Sets the process priority for this task. If this is used the "priority" setting below will be ignored.
+#-disableannouncementbox				Disables the text announcements Announcement Box makes when pulsed from wire.
+#-announcementboxrange <number>				Sets the announcement box text messaging range in pixels, -1 for serverwide announcements.
+#-seed <seed>						Specifies the world seed when using -autocreate
+
+#remove the # in front of commands to enable them.
+
+#Load a world and automatically start the server.
 world=$WORLD_FILE
-worldpath=$WORLD_DIR
-worldname=$WORLD_NAME
-difficulty=$DIFFICULTY
+
+#Creates a new world if none is found. World size is specified by: 1(small), 2(medium), and 3(large).
 $AUTOCREATE_LINE
+
+#Sets the world seed when using autocreate
 seed=$SEED
-worldevil=$WORLD_EVIL
 
-# --- Security ---
+#Sets the name of the world when using autocreate
+worldname=$WORLD_NAME
+
+#Sets the difficulty of the world when using autocreate 0(classic), 1(expert), 2(master), 3(journey)
+difficulty=$DIFFICULTY
+
+#Sets the max number of players allowed on a server.  Value must be between 1 and 255
+maxplayers=$MAX_PLAYERS
+
+#Set the port number
+port=$SERVER_PORT
+
+#Set the server password
 password=$PASSWORD
-motd=${MOTD:-"Welcome to Terraria Server!"}
-secure=$SECURE
-banlist=banlist.txt
 
-# --- System ---
+#Set the message of the day
+motd=${MOTD:-"Welcome to Terraria Server!"}
+
+#Sets the folder where world files will be stored
+worldpath=$WORLD_DIR
+
+#The location of the banlist. Defaults to "banlist.txt" in the working directory.
+banlist=$BANLIST
+
+#Adds addition cheat protection.
+secure=$SECURE
+
+#Sets the server language from its language code.
+#English = en-US, German = de-DE, Italian = it-IT, French = fr-FR, Spanish = es-ES, Russian = ru-RU, Chinese = zh-Hans, Portuguese = pt-BR, Polish = pl-PL,
 language=en-US
+
+#Automatically forward ports with uPNP
+upnp=$UPNP
+
+#Reduces enemy skipping but increases bandwidth usage. The lower the number the less skipping will happen, but more data is sent. 0 is off.
 $NPCSTREAM_LINE
 
-# --- Journey Mode Permissions ---
+#Default system priority 0:Realtime, 1:High, 2:AboveNormal, 3:Normal, 4:BelowNormal, 5:Idle
+priority=$PRIORITY
+
+#Journey mode power permissions for every individual power. 0: Locked for everyone, 1: Can only be changed by host, 2: Can be changed by everyone
 journeypermission_time_setfrozen=$JOURNEY_PERM
 journeypermission_time_setdawn=$JOURNEY_PERM
 journeypermission_time_setnoon=$JOURNEY_PERM
@@ -931,6 +1013,7 @@ journeypermission_setdifficulty=$JOURNEY_PERM
 journeypermission_biomespread_setfrozen=$JOURNEY_PERM
 journeypermission_setspawnrate=$JOURNEY_PERM
 CONFIG
+    
     chown terraria:terraria serverconfig.txt
 
     # Cleanup redundant actions (paths are already handled above)
