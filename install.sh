@@ -73,9 +73,12 @@ Options:
   -p, --port PORT          Server port
   -m, --maxplayers N       Max players
   --world-name NAME        World Name (default: Terraria)
+  --size N                 World Size (1=small, 2=medium, 3=large) (default: 2)
+  --difficulty N           Difficulty (0=classic, 1=expert, 2=master, 3=journey) (default: 1)
   --evil TYPE              World Evil (1=Random, 2=Corrupt, 3=Crimson)
   --seed TEXT              World Seed
   --secret-seed TEXT       Enable Secret Seed (e.g. 'not the bees')
+  --autocreate             Enable auto-creation of world if missing
   --enable-backup          Enable automated backups
   --backup-schedule TYPE   Schedule: daily, hourly, 6h, weekly, or "cron expr" (def: daily)
   --enable-monitor         Enable resource monitoring (RAM usage > 90%)
@@ -105,8 +108,12 @@ while [ "$#" -gt 0 ]; do
     -p|--port) SERVER_PORT="$2"; shift 2 ;;
     -m|--maxplayers) MAX_PLAYERS="$2"; shift 2 ;;
     --world-name) WORLD_NAME="$2"; shift 2 ;;
+    --size) WORLD_SIZE="$2"; shift 2 ;;
+    --difficulty) DIFFICULTY="$2"; shift 2 ;;
     --evil) WORLD_EVIL="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
+    --secret-seed) SECRET_SEED="$2"; shift 2 ;;
+    --autocreate) AUTOCREATE_FLAG=1; shift ;;
     --enable-backup) ENABLE_BACKUP=1; shift ;;
     --backup-schedule) ENABLE_BACKUP=1; BACKUP_SCHEDULE="$2"; shift 2 ;;
     --enable-monitor) ENABLE_MONITOR=1; shift ;;
@@ -230,6 +237,25 @@ if [ "$ARGS_PROVIDED" -eq 0 ] && [ -t 0 ]; then
   echo "---------------------------------"
 fi
 
+# Validation & Normalization
+if [[ ! "$WORLD_SIZE" =~ ^[1-3]$ ]]; then
+    echo "Error: World size must be 1 (small), 2 (medium), or 3 (large)." >&2
+    exit 1
+fi
+if [[ ! "$DIFFICULTY" =~ ^[0-3]$ ]]; then
+    echo "Error: Difficulty must be 0 (classic), 1 (expert), 2 (master), or 3 (journey)." >&2
+    exit 1
+fi
+if [[ ! "$WORLD_EVIL" =~ ^[1-3]$ ]]; then
+    echo "Error: World evil must be 1 (random), 2 (corrupt), or 3 (crimson)." >&2
+    exit 1
+fi
+
+# If --autocreate flag was used, set AUTOCREATE to the chosen WORLD_SIZE
+if [ "${AUTOCREATE_FLAG:-0}" -eq 1 ]; then
+    AUTOCREATE=$WORLD_SIZE
+fi
+
 
 # -----------------------------------------------------------------------------
 # 2. Idempotency Check
@@ -297,7 +323,7 @@ create_container_attempt() {
         TEMPLATE_FILE="$TEMPLATE_FILE_OVERRIDE"
     else
         # Robust template search: match templates whose name starts with the family
-        TEMPLATE_FILE=$(pveam available | awk '{print $1}' | grep -iE "^${TEMPLATE_FAMILY}" | sort -V | tail -n1)
+        TEMPLATE_FILE=$(pveam available | awk '{print $1}' | grep -iE "^${TEMPLATE_FAMILY}" | sort -V | tail -n1 || true)
     fi
 
     if [ -z "$TEMPLATE_FILE" ]; then
@@ -522,7 +548,10 @@ LAUNCH
     # --- DISCORD COMMANDER BOT SETUP (INTERNAL) ---
     if [ -n "$BOT_CODE" ]; then
         echo "Setting up Internal Discord Bot..."
-        echo "$BOT_CODE" > /opt/terraria/discord_bot.py
+        # Use quoted heredoc to safely write python code without shell expansion
+        cat > /opt/terraria/discord_bot.py <<'PYTHON_BOT'
+$BOT_CODE
+PYTHON_BOT
     fi
     
     # Finalize Bot Installation (Inside Container)
@@ -622,55 +651,10 @@ CONFIG
 
     # If no worlds exist, FORCE a generation run to prevent service crash on first boot.
     # We use input injection to answer the "Choose World" prompt that appears when the configured world is missing.
-    if ! find /opt/terraria -type f -name '*.wld' -print -quit >/dev/null 2>&1 && \
-       ! find /home/terraria -type f -name '*.wld' -print -quit >/dev/null 2>&1; then
-       
-       echo "No existing worlds found. Starting automatic world generation..."
-       echo "This may take a few minutes. Please wait..."
-       
-       # Prepare inputs: New World (n), Size, Difficulty, World Evil, Name, Seed, Secret Seed, Exit
-       # Defaults: Medium (2), Classic (1), "Terraria"
-       GEN_SIZE=${AUTOCREATE:-2}
-       [ "$GEN_SIZE" -eq 0 ] && GEN_SIZE=2
-       
-       # Config uses 0=Classic, 1=Expert...
-       # Menu uses 1=Classic, 2=Expert...
-       # So we map Config+1 to get Menu value.
-       GEN_DIFF=${DIFFICULTY:-1}
-       GEN_DIFF_MENU=$((GEN_DIFF + 1))
-       
-       GEN_EVIL=${WORLD_EVIL:-1}
-       GEN_NAME=${WORLD_NAME:-Terraria}
-       GEN_SEED=${SEED}
-       # Secret seed logic is complex (toggle menu), for standard automation we usually skip or just pass enter.
-       # If users want a specific seed, they usually provide GEN_SEED.
-       # The menu asks for "Seed" then "Secret Seed" confirmation.
-       
-       cat > /opt/terraria/setup.in <<INPUT
-n
-$GEN_SIZE
-$GEN_DIFF_MENU
-$GEN_EVIL
-$GEN_NAME
-$GEN_SEED
+    # World generation is now handled by the launch.sh Auto-Repair logic on first boot.
+    # This prevents silent failures during installation and ensures the server environment is fully ready.
+    echo "World generation will be handled by the service on first start if needed."
 
-exit
-INPUT
-       chown terraria:terraria /opt/terraria/setup.in
-       
-       # Run the server interactively with the input script
-       # We use 'timeout' to prevent hanging if something goes wrong, though generation can be slow.
-       if command -v timeout >/dev/null 2>&1; then
-           TIMEOUT_CMD="timeout 600" # 10 minutes max for generation
-       else
-           TIMEOUT_CMD=""
-       fi
-       
-       su -s /bin/bash terraria -c "$TIMEOUT_CMD /opt/terraria/TerrariaServer.bin.x86_64 -config /opt/terraria/serverconfig.txt < /opt/terraria/setup.in" >/dev/null 2>&1 || true
-       
-       echo "World generation attempt finished."
-       rm -f /opt/terraria/setup.in
-    fi
 
     # Supervisor fallback for containers without systemd (unprivileged CTs)
     # Only configure if Systemd is NOT present to avoid conflicts/redundancy.
@@ -693,7 +677,7 @@ SUPCONF
       chown terraria:terraria /var/log/terraria.log || true
 
       # If systemd not available, install SysV/OpenRC wrapper to start supervisord on boot
-      if ! command -v systemctl >/dev/null 2>&1 && [ -d /etc/init.d ]; then
+      if ! command -v systemctl >/dev/null 2>&1 && [ -d /etc/init.d ] && [ ! -f /etc/init.d/supervisord ]; then
         cat > /etc/init.d/supervisord <<'INIT'
 #!/sbin/openrc-run
 
