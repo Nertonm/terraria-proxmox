@@ -29,7 +29,8 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 def run_shell(command):
     """Runs a shell command and returns output."""
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
+        # Increased timeout to 600s (10m) for large backups
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=600)
         return result.stdout + result.stderr
     except subprocess.TimeoutExpired:
         return "Error: Command timed out."

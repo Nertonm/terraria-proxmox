@@ -18,7 +18,7 @@ Solução completa "Enterprise-Grade" para implantar, gerenciar e monitorar serv
 Copie e edite este bloco para instalar tudo de uma vez (sem perguntas):
 
 ```bash
-git clone https://github.com/nerton/terraria-proxmox.git
+git clone https://github.com/Nertonm/terraria-proxmox
 cd terraria-proxmox
 chmod +x install.sh scripts/*.sh
 

@@ -72,6 +72,7 @@ Options:
   --gw IP                  Gateway (e.g. 10.1.15.1)
   -p, --port PORT          Server port
   -m, --maxplayers N       Max players
+  --world-name NAME        World Name (default: Terraria)
   --evil TYPE              World Evil (1=Random, 2=Corrupt, 3=Crimson)
   --seed TEXT              World Seed
   --secret-seed TEXT       Enable Secret Seed (e.g. 'not the bees')
@@ -101,11 +102,11 @@ while [ "$#" -gt 0 ]; do
     --dhcp) NET_DHCP="yes"; shift ;;
     --ip) NET_IP="$2"; NET_DHCP="no"; shift 2 ;;
     --gw) NET_GW="$2"; shift 2 ;;
-    -p|--port) SERVER_PORT="$2"; shift 2 ;;
-    -m|--maxplayers) MAX_PLAYERS="$2"; shift 2 ;;
+    -p, --port) SERVER_PORT="$2"; shift 2 ;;
+    -m, --maxplayers) MAX_PLAYERS="$2"; shift 2 ;;
+    --world-name) WORLD_NAME="$2"; shift 2 ;;
     --evil) WORLD_EVIL="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
-    --secret-seed) SECRET_SEED="$2"; shift 2 ;;
     --enable-backup) ENABLE_BACKUP=1; shift ;;
     --backup-schedule) ENABLE_BACKUP=1; BACKUP_SCHEDULE="$2"; shift 2 ;;
     --enable-monitor) ENABLE_MONITOR=1; shift ;;
