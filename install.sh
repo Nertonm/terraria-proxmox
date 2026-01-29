@@ -202,7 +202,9 @@ if [ "$ARGS_PROVIDED" -eq 0 ] && [ -t 0 ]; then
   SEED=${input_seed:-$SEED}
   
   read -rp "Secret Seed (optional, e.g. 'not the bees'): " input_secret
-  SECRET_SEED=${input_secret:-$SECRET_SEED}
+  if [ -n "$input_secret" ]; then
+    SEED="$input_secret"
+  fi
 
   read -rp "Password (empty for none): " input_pass
   PASSWORD=${input_pass:-$PASSWORD}
@@ -280,6 +282,11 @@ fi
 # If --autocreate flag was used, set AUTOCREATE to the chosen WORLD_SIZE
 if [ "${AUTOCREATE_FLAG:-0}" -eq 1 ]; then
     AUTOCREATE=$WORLD_SIZE
+fi
+
+# Merge Secret Seed if provided
+if [ -n "$SECRET_SEED" ]; then
+    SEED="$SECRET_SEED"
 fi
 
 
@@ -614,7 +621,7 @@ J
 
 # Sanity Check: World Existence
 # Read world path, handling potential whitespace around '='
-WORLD_PATH=$(grep "world=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs)
+WORLD_PATH=$(grep "^world=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
 
 if [ -n "$WORLD_PATH" ]; then
     # 1. Check for 0-byte corrupted worlds
@@ -629,15 +636,21 @@ if [ -n "$WORLD_PATH" ]; then
         notify "Auto-Repair" 16776960 "World file missing. Attempting emergency generation..."
         
         # Extract config values for generation
-        W_NAME=$(grep "worldname=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
+        W_NAME=$(grep "^worldname=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
         [ -z "$W_NAME" ] && W_NAME="TerrariaRequest"
 
         # Try to match difficulty (Config 0-3)
-        W_DIFF_C=$(grep "difficulty=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
+        W_DIFF_C=$(grep "^difficulty=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
         [ -z "$W_DIFF_C" ] && W_DIFF_C=0
+        
+        # Try to match seed
+        W_SEED_C=$(grep "^seed=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
+        
+        # Try to match worldevil
+        W_EVIL_C=$(grep "^worldevil=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
 
         # Try to match size (Config autocreate=1,2,3) - Default to 2 (Medium)
-        W_SIZE_C=$(grep "autocreate=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
+        W_SIZE_C=$(grep "^autocreate=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
         if [[ "$W_SIZE_C" =~ ^[1-3]$ ]]; then
             W_SIZE="$W_SIZE_C"
         else
@@ -645,12 +658,19 @@ if [ -n "$WORLD_PATH" ]; then
         fi
         
         echo "Running generation via CLI params..."
-        # We use -config to load settings, but override autocreate to force generation
-        # This bypasses the 'LoadWorld' crash because the server knows it's in generation mode
-        "$BIN" -config "$CONF" \
-            -autocreate "$W_SIZE" \
-            -worldname "$W_NAME" \
-            -difficulty "$W_DIFF_C" > "$DIR/gen.log" 2>&1
+        # Construct command array to safely handle optional arguments
+        CMD_ARGS=("$BIN" "-config" "$CONF" "-autocreate" "$W_SIZE" "-worldname" "$W_NAME" "-difficulty" "$W_DIFF_C")
+        
+        if [ -n "$W_SEED_C" ]; then
+            CMD_ARGS+=("-seed" "$W_SEED_C")
+        fi
+        
+        if [ -n "$W_EVIL_C" ]; then
+             CMD_ARGS+=("-worldevil" "$W_EVIL_C")
+        fi
+        
+        # Execute generation
+        "${CMD_ARGS[@]}" > "$DIR/gen.log" 2>&1
             
         # Check result
         
@@ -855,6 +875,7 @@ worldname=$WORLD_NAME
 difficulty=$DIFFICULTY
 $AUTOCREATE_LINE
 seed=$SEED
+worldevil=$WORLD_EVIL
 
 # --- Security ---
 password=$PASSWORD
