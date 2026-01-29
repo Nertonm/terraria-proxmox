@@ -70,6 +70,9 @@ WorkingDirectory=$PROJECT_DIR
 Environment="DISCORD_BOT_TOKEN=$BOT_TOKEN"
 Environment="DISCORD_USER_ID=$USER_ID"
 Environment="CT_ID=$CT_ID"
+Environment="PYTHONIOENCODING=utf-8"
+Environment="LANG=C.UTF-8"
+Environment="LC_ALL=C.UTF-8"
 ExecStart=$VENV_DIR/bin/python $BOT_SCRIPT
 Restart=always
 RestartSec=10

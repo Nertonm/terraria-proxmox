@@ -99,8 +99,8 @@ async def on_ready():
             channel = bot.get_channel(LOG_CHANNEL_ID)
             if channel:
                 embed = discord.Embed(
-                    title="🤖 Bot Online", 
-                    description="O Gerenciador Terraria está ativo.", 
+                    title="\U0001f916 Bot Online", 
+                    description="O Gerenciador Terraria est\u00e1 ativo.", 
                     color=discord.Color.blue()
                 )
                 embed.add_field(name="Ping", value=f"{round(bot.latency * 1000)}ms", inline=True)
@@ -153,12 +153,12 @@ async def monitor(ctx):
     # Save Persistence
     try:
         # Save locally (bot's environment)
-        with open(CHANNEL_ID_FILE, 'w') as f:
+        with open(CHANNEL_ID_FILE, 'w', encoding='utf-8') as f:
             f.write(str(LOG_CHANNEL_ID))
                  
-        await ctx.send("👀 **Monitoramento ativado!** As atualizações aparecerão aqui.")
+        await ctx.send("\U0001f440 **Monitoramento ativado!** As atualiza\u00e7\u00f5es aparecer\u00e3o aqui.")
     except Exception as e:
-        await ctx.send(f"⚠️ Falha ao salvar canal padrão: {e}")
+        await ctx.send(f"\u26a0\ufe0f Falha ao salvar canal padr\u00e3o: {e}")
 
 async def log_monitor_task():
     """Continuously reads the server log for Join/Leave events."""
@@ -444,7 +444,7 @@ class ServerControlView(discord.ui.View):
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("⛔ Estes botões não são para você!", ephemeral=True)
+            await interaction.response.send_message("\u26d4 Estes bot\u00f5es n\u00e3o s\u00e3o para voc\u00ea!", ephemeral=True)
             return False
         return True
 
@@ -588,15 +588,15 @@ async def backup(ctx):
 @bot.command(name="help")
 async def help_command(ctx):
     """Shows this help message."""
-    embed = discord.Embed(title="🤖 Comandos Terraria Bot", description="Controle seu servidor diretamente pelo Discord.", color=discord.Color.blue())
+    embed = discord.Embed(title="\U0001f916 Comandos Terraria Bot", description="Controle seu servidor diretamente pelo Discord.", color=discord.Color.blue())
     
-    embed.add_field(name="🎮 **Gerenciamento**", value="`!status` - Info do Servidor & Jogadores\n`!start` - Iniciar Servidor\n`!stop` - Parar Servidor\n`!restart` - Reinício Instantâneo\n`!reboot [min]` - Reinício Suave com Aviso", inline=False)
+    embed.add_field(name="\U0001f3ae **Gerenciamento**", value="`!status` - Info do Servidor & Jogadores\n`!start` - Iniciar Servidor\n`!stop` - Parar Servidor\n`!restart` - Rein\u00edcio Instant\u00e2neo\n`!reboot [min]` - Rein\u00edcio Suave com Aviso", inline=False)
     
-    embed.add_field(name="🛠️ **Manutenção**", value="`!update <ver>` - Atualizar servidor\n`!backup` - Backup Manual do Mundo\n`!storage` - Ver Tamanho de Disco\n`!logs [linhas]` - Ver Logs do Servidor\n`!save` - Forçar Salvamento", inline=False)
+    embed.add_field(name="\U0001f6e0\ufe0f **Manuten\u00e7\u00e3o**", value="`!update <ver>` - Atualizar servidor\n`!backup` - Backup Manual do Mundo\n`!storage` - Ver Tamanho de Disco\n`!logs [linhas]` - Ver Logs do Servidor\n`!save` - For\u00e7ar Salvamento", inline=False)
     
-    embed.add_field(name="👮 **Moderação**", value="`!kick <nome> [motivo]` - Expulsar Jogador\n`!ban <nome> [motivo]` - Banir Jogador", inline=False)
+    embed.add_field(name="\U0001f46e **Modera\u00e7\u00e3o**", value="`!kick <nome> [motivo]` - Expulsar Jogador\n`!ban <nome> [motivo]` - Banir Jogador", inline=False)
 
-    embed.add_field(name="💬 **Console**", value="`!say <msg>` - Enviar Mensagem no Chat\n`!cmd <comando>` - Comando RCON/Console", inline=False)
+    embed.add_field(name="\U0001f4ac **Console**", value="`!say <msg>` - Enviar Mensagem no Chat\n`!cmd <comando>` - Comando RCON/Console", inline=False)
     
     embed.set_thumbnail(url="https://terraria.org/assets/terraria-logo.png")
     embed.set_footer(text="Terraria Proxmox Manager")
@@ -638,7 +638,7 @@ async def reboot(ctx, minutes: int = 5):
     
     if minutes < 1: minutes = 1
     
-    await ctx.send(f"⏳ **Reinício Suave Agendado em {minutes} minutos.**")
+    await ctx.send(f"\u23f3 **Rein\u00edcio Suave Agendado em {minutes} minutos.**")
     
     # Countdown
     for i in range(minutes, 0, -1):
