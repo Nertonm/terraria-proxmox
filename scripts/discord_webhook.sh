@@ -14,12 +14,6 @@ fi
 
 WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
-if [ -z "$WEBHOOK_URL" ]; then
-  # Fail silently if not configured, or log to stderr
-  echo "Warning: DISCORD_WEBHOOK_URL not configured. Skipping notification." >&2
-  exit 0
-fi
-
 # Defaults
 TITLE="Notification"
 DESCRIPTION=""
@@ -61,6 +55,12 @@ while [[ "$#" -gt 0 ]]; do
     *) echo "Unknown parameter: $1"; exit 1 ;;
   esac
 done
+
+if [ -z "$WEBHOOK_URL" ]; then
+  # Fail silently if not configured, or log to stderr
+  echo "Warning: DISCORD_WEBHOOK_URL not configured. Skipping notification." >&2
+  exit 0
+fi
 
 # Set Styles based on Status
 case "$STATUS" in
