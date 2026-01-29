@@ -17,7 +17,7 @@ notify_backup() {
   local msg="$3"
   local file_path="${4:-}"
   
-  local script_dir="$(dirname "$0")"
+  local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   if [ -x "$script_dir/discord_webhook.sh" ]; then
     local args=(--title "$title" --desc "$msg" --status "$status")
     

@@ -10,4 +10,4 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Run shellcheck
-        run: shellcheck install.sh scripts/backup_terraria.sh
+        run: shellcheck install.sh scripts/*.sh

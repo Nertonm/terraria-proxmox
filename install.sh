@@ -365,6 +365,13 @@ fi
 # -----------------------------------------------------------------------------
 echo "--- Starting Provisioning ---"
 
+# Read Bot Code into variable for injection
+if [ "$ENABLE_BOT" -eq 1 ] && [ -f "$PROJECT_DIR/scripts/discord_bot.py" ]; then
+    BOT_CODE=$(cat "$PROJECT_DIR/scripts/discord_bot.py")
+else
+    BOT_CODE=""
+fi
+
 # We export variables to the 'env' command so they are available in the shell spawned by 'pct exec'.
 pct exec "$CT_ID" -- env \
   TERRARIA_VERSION="$TERRARIA_VERSION" \
@@ -381,10 +388,83 @@ pct exec "$CT_ID" -- env \
   SECURE="$SECURE" \
   AUTOCREATE="$AUTOCREATE" \
   DISCORD_URL="$DISCORD_URL" \
+  BOT_TOKEN="$BOT_TOKEN" \
+  BOT_USER_ID="$BOT_USER_ID" \
+  BOT_CODE="$BOT_CODE" \
   LC_ALL=C \
   /bin/sh -s <<'EOF'
     set -e
     
+    # Save Discord URL for internal scripts (launch.sh)
+    if [ -n "$DISCORD_URL" ]; then
+       echo "$DISCORD_URL" > /opt/terraria/.discord_url
+       chmod 600 /opt/terraria/.discord_url
+       chown terraria:terraria /opt/terraria/.discord_url
+    fi
+
+    # Create the Launch Wrapper (handles notifications)
+    cat > /opt/terraria/launch.sh <<'LAUNCH'
+#!/bin/bash
+# Wrapper to run Terraria and handle Start/Stop notifications
+DIR="/opt/terraria"
+BIN="$DIR/TerrariaServer.bin.x86_64"
+CONF="$DIR/serverconfig.txt"
+URL_FILE="$DIR/.discord_url"
+
+# Simple Notification Function
+notify() {
+    [ ! -f "$URL_FILE" ] && return
+    local title="$1"
+    local color="$2" # integer
+    local desc="$3"
+    local url=$(cat "$URL_FILE")
+    [ -z "$url" ] && return
+    
+    # Try to get local IP
+    local ip=$(ip -4 a s eth0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1 || echo "Unknown")
+
+    # JSON Payload (minimal)
+    local json=$(cat <<J
+{
+  "embeds": [{
+    "title": "$title",
+    "description": "$desc",
+    "color": $color,
+    "fields": [
+      { "name": "Server IP", "value": "$ip", "inline": true }
+    ],
+    "footer": { "text": "Terraria Server Status" },
+    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  }]
+}
+J
+)
+    curl -s -H "Content-Type: application/json" -d "$json" "$url" >/dev/null || true
+}
+
+notify "Server Starting" 3447003 "Terraria Server is booting up..."
+
+# Run the Server
+"$BIN" -config "$CONF"
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    notify "Server Stopped" 15158332 "Server shut down normally."
+else
+    notify "Server Crashed" 15158332 "Server exited with error code $EXIT_CODE."
+fi
+
+exit $EXIT_CODE
+LAUNCH
+    chmod +x /opt/terraria/launch.sh
+    chown terraria:terraria /opt/terraria/launch.sh
+
+    # --- DISCORD COMMANDER BOT SETUP (INTERNAL) ---
+    if [ -n "$BOT_CODE" ]; then
+        echo "Setting up Internal Discord Bot..."
+        echo "$BOT_CODE" > /opt/terraria/discord_bot.py
+    fi
+
     # Ensure DNS resolution via fallback if DHCP failed to provide it
     if ! ping -c 1 google.com >/dev/null 2>&1; then
         echo "Network check failed. Forcing DNS 8.8.8.8 in /etc/resolv.conf..."
@@ -395,17 +475,25 @@ pct exec "$CT_ID" -- env \
     if command -v apk >/dev/null 2>&1; then
         echo "Alpine detected."
         apk update
-        apk add --no-cache bash findutils icu-libs wget unzip tmux curl ca-certificates iproute2
+        apk add --no-cache bash findutils icu-libs wget unzip tmux curl ca-certificates iproute2 python3 py3-pip
     elif command -v apt-get >/dev/null 2>&1; then
       echo "Debian/Ubuntu detected."
       apt-get update
-      apt-get install -y wget unzip tmux libicu-dev supervisor curl ca-certificates iproute2
+      apt-get install -y wget unzip tmux libicu-dev supervisor curl ca-certificates iproute2 python3 python3-venv python3-pip
     elif command -v dnf >/dev/null 2>&1; then
         echo "Fedora/RHEL detected."
-        dnf install -y wget unzip tmux libicu curl ca-certificates iproute
+        dnf install -y wget unzip tmux libicu curl ca-certificates iproute python3 python3-pip
     else
         echo "Error: No supported package manager found (apk, apt, dnf)."
         exit 1
+    fi
+    
+    # Finalize Bot Installation (Inside Container)
+    if [ -n "$BOT_TOKEN" ]; then
+        echo "Finalizing Bot Python Environment..."
+        python3 -m venv /opt/terraria/.bot_venv
+        /opt/terraria/.bot_venv/bin/pip install discord.py --quiet
+        chown -R terraria:terraria /opt/terraria/.bot_venv /opt/terraria/discord_bot.py
     fi
     
     # Create User 'terraria' with predictable home and shell
@@ -723,8 +811,45 @@ SERVICE
         systemctl daemon-reload
         systemctl enable --now terraria
         
+        # Bot Service (Internal)
+        if [ -n "$BOT_TOKEN" ]; then
+            cat > /etc/systemd/system/terraria-bot.service <<BOTSERVICE
+[Unit]
+Description=Terraria Discord Commander Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/terraria
+Environment="DISCORD_BOT_TOKEN=$BOT_TOKEN"
+Environment="DISCORD_USER_ID=$BOT_USER_ID"
+ExecStart=/opt/terraria/.bot_venv/bin/python /opt/terraria/discord_bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+BOTSERVICE
+            systemctl enable --now terraria-bot
+        fi
+        
     elif [ -d /etc/init.d ]; then
         echo "Configuring OpenRC service..."
+        # ...
+        # (Internal Bot for Supervisor/OpenRC fallback)
+        if [ -n "$BOT_TOKEN" ] && command -v supervisord >/dev/null 2>&1; then
+            cat > /etc/supervisor/conf.d/terraria-bot.conf <<BOTSUP
+[program:terraria-bot]
+command=/opt/terraria/.bot_venv/bin/python /opt/terraria/discord_bot.py
+directory=/opt/terraria
+user=root
+autostart=true
+autorestart=true
+environment=DISCORD_BOT_TOKEN="$BOT_TOKEN",DISCORD_USER_ID="$BOT_USER_ID"
+BOTSUP
+            supervisorctl update || true
+        fi
         # If supervisord is available, create a wrapper that uses supervisorctl
         if command -v supervisorctl >/dev/null 2>&1; then
             cat > /etc/init.d/terraria <<'SERVICE'
@@ -851,18 +976,6 @@ if [ "$ENABLE_MONITOR" -eq 1 ]; then
         fi
     else
          echo "Warning: Monitor script not executable or found at $MONITOR_SCRIPT"
-    fi
-fi
-
-# Setup Discord Commander Bot
-if [ "$ENABLE_BOT" -eq 1 ]; then
-    BOT_SETUP_SCRIPT="$PROJECT_DIR/scripts/setup_bot.sh"
-    if [ -x "$BOT_SETUP_SCRIPT" ]; then
-        echo "Configuring Discord Commander Bot..."
-        # Usage: ./setup_bot.sh CT_ID TOKEN USER_ID
-        "$BOT_SETUP_SCRIPT" "$CT_ID" "$BOT_TOKEN" "$BOT_USER_ID"
-    else
-        echo "Warning: Bot setup script not executable or found at $BOT_SETUP_SCRIPT"
     fi
 fi
 

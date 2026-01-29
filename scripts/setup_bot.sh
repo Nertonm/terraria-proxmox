@@ -16,7 +16,14 @@ echo "--- Setting up Discord Bot for CT $CT_ID ---"
 
 # 1. Install Dependencies
 echo "Installing Python dependencies (requires sudo)..."
-apt-get update && apt-get install -y python3-venv python3-pip
+# We accept that 'apt-get update' might fail on Proxmox Enterprise repos without sub.
+# We proceed to try install anyway, as standard Debian repos usually work.
+apt-get update || true 
+apt-get install -y python3-venv python3-pip || {
+    echo "Apt install failed. Please check your Proxmox repositories."
+    echo "If you don't have a subscription, disable enterprise repos and enable pve-no-subscription."
+    exit 1
+}
 
 # 2. Create Virtual Environment
 if [ ! -d "$VENV_DIR" ]; then
