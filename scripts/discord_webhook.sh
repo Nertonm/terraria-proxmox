@@ -33,7 +33,7 @@ THUMBNAIL=""
 
 # Escape JSON string function
 json_escape() {
-  echo "$1" | sed 's/"/\"/g' | sed ':a;N;$!ba;s/\n/\\n/g'
+  echo "$1" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g'
 }
 
 # Parse Arguments

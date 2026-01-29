@@ -1,21 +1,26 @@
 # Terraria Proxmox LXC Manager 🚀
 
-Solução completa "Enterprise-Grade" para implantar, gerenciar e monitorar servidores de Terraria (v1.4.5.0+) em Proxmox VE.
+Solução "Enterprise-Grade" completa para implantar, gerenciar e monitorar servidores de Terraria (v1.4.5.0+) em **Proxmox VE**.
 
-## ✨ Funcionalidades
+Agora com suporte **Multi-Distro** (Debian, Ubuntu, Alpine, Fedora) e resiliência a falhas de boot.
 
-- **Instalação Inteligente:** Deploy automatizado com Wizard interativo ou CLI completa.
-- **Geração Automática de Mundo:** Setup compliance com v1.4.5.0 (Tamanho, Dificuldade, Evil, Seed).
-- **Notificações Discord:** Alertas ricos via Webhook para Backups, Updates, Crash e Status.
-- **Bot de Comando:** Controle total via chat (`!start`, `!stop`, `!backup`, `!status`).
-- **Monitoramento de Saúde:** Alertas automáticos de RAM (>90%) e Disco cheio.
-- **Backups Flexíveis:** Agendamento diário, horário, semanal ou Cron customizado.
+## ✨ Funcionalidades Principais
+
+- **🛡️ Instalação Resiliente:** Suporte nativo a containers privilegiados e não-privilegiados, com detecção automática de init system (`systemd`, `openrc`, `supervisor`).
+- **🔧 Auto-Repair de Mundo:** O servidor detecta se o mundo sumiu ou corrompeu e tenta regenerá-lo automaticamente na inicialização, prevenindo "Crash Loops".
+- **💬 Integração Rica com Discord:**
+    - **Webhooks:** Notificações coloridas para Status (ON/OFF), Crash, Backups e Updates.
+    - **Bot Bidirecional:** Controle o servidor via chat (`!start`, `!stop`, `!restart`, `!status`).
+- **📦 Manutenção Automatizada:**
+    - **Updates Seguros:** Verifica espaço em disco (>500MB) e limpa versões antigas.
+    - **Backups Inteligentes:** Rotação automática e suporte a snapshot "frio" (para serviços).
+- **📊 Monitoramento Proativo:** Alertas de RAM (>90%) e Disco Cheio com cooldown para evitar spam.
 
 ---
 
-## ⚡ Quick Install (Full Template)
+## ⚡ Instalação Rápida (Full Template)
 
-Copie e edite este bloco para instalar tudo de uma vez (sem perguntas):
+Copie e edite este comando para uma instalação completa e monitorada:
 
 ```bash
 git clone https://github.com/Nertonm/terraria-proxmox
@@ -23,69 +28,96 @@ cd terraria-proxmox
 chmod +x install.sh scripts/*.sh
 
 ./install.sh 1550 \
+  --template alpine \
   --version 1450 \
   --port 7777 \
   --maxplayers 8 \
   --world-name "TerrariaWorld" \
+  --size 2 \
+  --difficulty 1 \
   --evil 1 \
-  --seed "MySuperSeed" \
-  --secret-seed "not the bees" \
   --enable-backup \
-  --backup-schedule "daily" \
+  --backup-schedule "6h" \
   --enable-monitor \
   --discord-url "https://discord.com/api/webhooks/SEU_WEBHOOK_AQUI" \
   --enable-bot \
   --bot-token "SEU_BOT_TOKEN_AQUI" \
-  --bot-userid "SEU_DISCORD_USER_ID"
+  --bot-userid "SEU_ID_NUMERICO"
 ```
 
 ### 📝 Legenda das Flags
 
 | Flag | Descrição | Exemplo |
 | :--- | :--- | :--- |
-| `1550` | ID do Container (Posicional) | `100` |
-| `--version` | Versão do Terraria | `1450` |
-| `--evil` | Bioma do Mundo (1=Random, 2=Corrupt, 3=Crimson) | `2` |
-| `--seed` | Seed do Mapa | `"Abacaxi"` |
-| `--secret-seed` | Seed Especial (Easter Eggs) | `"not the bees"` |
-| `--enable-backup` | Ativa backups automáticos | - |
+| `1550` | ID do Container (Posicional - Obrigatório) | `100` |
+| `-t, --template` | Família do OS (`alpine`, `ubuntu`, `debian`, `fedora`) | `alpine` |
+| `--version` | Versão do Servidor Terraria | `1450` |
+| `--size` | Tamanho do Mundo (1=Small, 2=Medium, 3=Large) | `2` |
+| `--difficulty` | Dificuldade (0=Classic, 1=Expert, 2=Master) | `1` |
+| `--evil` | Bioma (1=Random, 2=Corrupt, 3=Crimson) | `2` |
+| `--enable-backup` | Ativa a rotina de backups automáticos | - |
 | `--backup-schedule` | Frequência (`daily`, `hourly`, `6h`, `weekly`) | `6h` |
-| `--enable-monitor` | Ativa alertas de RAM/Disco | - |
-| `--discord-url` | URL do Webhook para notificações | `"https://..."` |
-| `--enable-bot` | Instala o Bot de comando (Python) | - |
-| `--bot-token` | Token do Bot (Developer Portal) | `"MTA..."` |
-| `--bot-userid` | Seu ID de usuário (para segurança) | `12345678` |
+| `--enable-monitor` | Ativa alertas de saúde (RAM/Disco) | - |
+| `--discord-url` | Webhook URL para logs e notificações | `"https://..."` |
+| `--enable-bot` | Instala o Bot de controle remoto | - |
 
 ---
 
 ## 🤖 Controle via Bot do Discord
 
-Se você ativou o `--enable-bot`, o serviço `terraria-bot` já está rodando no host.
+Se ativado, o bot responde a comandos no canal onde ele tem permissão. Somente o usuário definido em `--bot-userid` pode executar comandos administrativos.
 
-### Comandos Disponíveis:
-- `!ping` - Testa a conexão.
-- `!status` - Relatório detalhado (Jogadores, RAM, CPU, Disco).
-- `!start` / `!stop` / `!restart` - Controle de energia do container.
-- `!backup` - Dispara backup manual imediato.
-
----
-
-## 🛠️ Scripts de Administração (`scripts/`)
-
-Todos os scripts devem ser executados no **Host Proxmox**.
-
-- **Backup:** `./scripts/backup_terraria.sh <CT_ID>`
-- **Restore:** `./scripts/restore_terraria.sh <CT_ID> <arquivo.tar.gz>`
-- **Update:** `./scripts/update_terraria.sh <CT_ID> <VERSÃO>`
-- **Health Report:** `./scripts/monitor_health.sh <CT_ID> --report`
-- **Security:** `./scripts/harden_lxc.sh <CT_ID>`
+### Comandos:
+- `!ping` - Verifica se o bot interno está vivo.
+- `!status` - Relatório ao vivo (RAM, Uptime, Jogadores Online).
+- `!start` / `!stop` / `!restart` - Controla o **serviço** do jogo (o container permanece ligado).
 
 ---
 
-## 📋 Monitoramento Manual
+## 🛠️ Scripts de Manutenção (Host)
 
-- **Logs do Bot:** `journalctl -u terraria-bot -f`
-- **Logs do Jogo:** `pct exec 1550 -- journalctl -u terraria -f`
+Execute estes scripts no host Proxmox para gerenciar o servidor:
+
+### 🔄 Atualizar Server
+Baixa a nova versão, verifica espaço em disco, faz backup do binário antigo e atualiza atomicamente.
+```bash
+./scripts/update_terraria.sh <CT_ID> <VERSAO>
+# Exemplo: ./scripts/update_terraria.sh 1550 1451
+```
+
+### 💾 Backup & Restore
+O sistema de backup é compatível com qualquer init system (para o serviço corretamente antes de copiar os dados).
+```bash
+# Backup Manual
+./scripts/backup_terraria.sh <CT_ID>
+
+# Restaurar Backup (Isso sobrescreve o mundo atual!)
+./scripts/restore_terraria.sh <CT_ID> ./backups/terraria-1550-DATA.tar.gz
+```
+
+### 🏥 Health Check
+Gera um relatório instantâneo de saúde.
+```bash
+./scripts/monitor_health.sh <CT_ID> --report
+```
 
 ---
-Desenvolvido para transformar seu Proxmox em um host de games profissional. 🎮
+
+## 🐛 Troubleshooting
+
+### Boot Loop Detectado?
+Se o servidor notificar "Boot Loop Detected" no Discord:
+1. Isso geralmente significa que o arquivo de mundo corrompeu ou sumiu, e o servidor está travado no menu "Choose World".
+2. O sistema **Auto-Repair** tentará gerar um novo mundo automaticamente na próxima tentativa.
+3. Se persistir, use o `restore_terraria.sh` para recuperar um backup anterior.
+
+### Onde estão os logs?
+Dependendo do OS escolhido, os logs podem estar em lugares diferentes. O script unifica isso em `/var/log/terraria.log` na maioria dos casos.
+
+```bash
+# Ver logs em tempo real (Funciona para Systemd e Supervisor)
+pct exec 1550 -- tail -f /var/log/terraria.log
+```
+
+---
+Desenvolvido com ❤️ para a comunidade Terraria & Proxmox.

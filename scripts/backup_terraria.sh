@@ -53,7 +53,7 @@ echo "--- Starting Backup for Container $CT_ID ---"
 
 # 1. Stop Service (to ensure world consistency)
 echo "Stopping Terraria service..."
-pct exec "$CT_ID" -- systemctl stop terraria || echo "Service stop failed or service not running (ignoring)..."
+pct exec "$CT_ID" -- bash -c "systemctl stop terraria || supervisorctl stop terraria || rc-service terraria stop || true"
 
 # 2. Create Archive
 # We backup /opt/terraria (binaries/config) and /home/terraria (worlds/saves)
@@ -62,7 +62,7 @@ pct exec "$CT_ID" -- tar -czf - /opt/terraria /home/terraria > "$OUT"
 
 # 3. Start Service
 echo "Restarting Terraria service..."
-pct exec "$CT_ID" -- systemctl start terraria || echo "Service start warning."
+pct exec "$CT_ID" -- bash -c "systemctl start terraria || supervisorctl start terraria || rc-service terraria start || true"
 
 echo "Backup saved to: $OUT"
 

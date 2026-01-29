@@ -67,6 +67,7 @@ Positional:
 Options:
   -t, --template FAMILY    Template family (e.g. alpine, ubuntu)
   -v, --version VER        Terraria version (default: 1450)
+  --local-zip FILE         Use local server zip instead of downloading
   --static                 Use static IP (requires --ip and --gw)
   --ip CIDR                Static IP (e.g. 10.1.15.50/24)
   --gw IP                  Gateway (e.g. 10.1.15.1)
@@ -101,6 +102,7 @@ while [ "$#" -gt 0 ]; do
     -h|--help) usage; exit 0 ;;
     -t|--template) TEMPLATE_FAMILY="$2"; shift 2 ;;
     -v|--version) TERRARIA_VERSION="$2"; shift 2 ;;
+    --local-zip) LOCAL_ZIP_PATH="$2"; shift 2 ;;
     --static) NET_DHCP="no"; shift ;;
     --dhcp) NET_DHCP="yes"; shift ;;
     --ip) NET_IP="$2"; NET_DHCP="no"; shift 2 ;;
@@ -398,6 +400,19 @@ else
     BOT_CODE=""
 fi
 
+# Check for local file priority
+if [ -n "${LOCAL_ZIP_PATH:-}" ]; then
+    if [ ! -f "$LOCAL_ZIP_PATH" ]; then
+        echo "Error: Local zip file '$LOCAL_ZIP_PATH' not found."
+        exit 1
+    fi
+    echo "Pushing local zip to container..."
+    pct push "$CT_ID" "$LOCAL_ZIP_PATH" "/tmp/terraria_local.zip"
+elif [ -f "$PROJECT_DIR/terraria-server-$TERRARIA_VERSION.zip" ]; then
+    echo "Found local cache: terraria-server-$TERRARIA_VERSION.zip. Using it."
+    pct push "$CT_ID" "$PROJECT_DIR/terraria-server-$TERRARIA_VERSION.zip" "/tmp/terraria_local.zip"
+fi
+
 # We export variables to the 'env' command so they are available in the shell spawned by 'pct exec'.
 pct exec "$CT_ID" -- env \
   TERRARIA_VERSION="$TERRARIA_VERSION" \
@@ -496,13 +511,24 @@ DIR="/opt/terraria"
 BIN="$DIR/TerrariaServer.bin.x86_64"
 CONF="$DIR/serverconfig.txt"
 URL_FILE="$DIR/.discord_url"
+LOG_FILE="/var/log/terraria.log"
+
+# Escape JSON strings
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/ }"
+    s="${s//$'\r'/}"
+    echo "$s"
+}
 
 # Simple Notification Function
 notify() {
     [ ! -f "$URL_FILE" ] && return
-    local title="$1"
+    local title="$(json_escape "$1")"
     local color="$2" # integer
-    local desc="$3"
+    local desc="$(json_escape "$3")"
     local url=$(cat "$URL_FILE")
     [ -z "$url" ] && return
     
@@ -528,18 +554,79 @@ J
     curl -s -H "Content-Type: application/json" -d "$json" "$url" >/dev/null || true
 }
 
+# Sanity Check: World Existence
+# Read world path, handling potential whitespace around '='
+WORLD_PATH=$(grep "world=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs)
+
+if [ -n "$WORLD_PATH" ]; then
+    # 1. Check for 0-byte corrupted worlds
+    if [ -f "$WORLD_PATH" ] && [ ! -s "$WORLD_PATH" ]; then
+        echo "Warning: World file exists but is empty (corrupted). Deleting to allow regen."
+        rm -f "$WORLD_PATH"
+    fi
+
+    # 2. Auto-Repair if missing
+    if [ ! -f "$WORLD_PATH" ]; then
+        echo "Warning: World file configured ($WORLD_PATH) not found."
+        notify "Auto-Repair" 16776960 "World file missing. Attempting emergency generation..."
+        
+        # Extract config values for generation
+        W_NAME=$(grep "worldname=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs)
+        [ -z "$W_NAME" ] && W_NAME="TerrariaRequest"
+        
+        # Generator Inputs: n, Size(2), Diff(1), Evil(1), Name, Seed, Secret...
+        cat > "$DIR/autogen.in" <<SETUP
+n
+2
+1
+1
+$W_NAME
+
+
+exit
+SETUP
+        
+        echo "Running generation..."
+        "$BIN" -config "$CONF" < "$DIR/autogen.in" > "$DIR/gen.log" 2>&1
+        rm -f "$DIR/autogen.in"
+        
+        if [ -s "$WORLD_PATH" ]; then
+             notify "Auto-Repair Success" 3066993 "World generated successfully. Starting server..."
+        else
+             LAST_LOG=$(tail -n 3 "$DIR/gen.log")
+             notify "Auto-Repair Failed" 15158332 "Could not generate world. Log: $LAST_LOG"
+             # Don't exit yet, let the server try and fail visibly
+        fi
+    fi
+fi
+
 notify "Server Starting" 3447003 "Terraria Server is booting up..."
 
 # Run the Server
-"$BIN" -config "$CONF"
+# Pipe output to capture start errors (like 'Choose World' menu)
+"$BIN" -config "$CONF" > "$DIR/server_output.log" 2>&1 &
+PID=$!
+wait $PID
 EXIT_CODE=$?
 
+# Capture last lines for diagnosis
+LAST_LOGS=$(tail -n 10 "$DIR/server_output.log" | sed 's/^[[:space:]]*//' | cut -c 1-200)
+
+# Diagnosis Logic
 if [ $EXIT_CODE -eq 0 ]; then
-    notify "Server Stopped" 15158332 "Server shut down normally."
+    # If exit 0, check if it was a "Menu Exit" (Failure to load)
+    if echo "$LAST_LOGS" | grep -qiE "(choose world|select world|enter world name)"; then
+        notify "Boot Error" 15158332 "Server failed to load world and dropped to menu. Check config/paths. Logs: $LAST_LOGS"
+        # Force error exit code to stop systemd from thinking it was a success
+        exit 1
+    else
+        notify "Server Stopped" 15158332 "Server shut down normally."
+    fi
 else
-    notify "Server Crashed" 15158332 "Server exited with error code $EXIT_CODE."
+    notify "Server Crashed" 15158332 "Exit Code: $EXIT_CODE. Logs: $LAST_LOGS"
 fi
 
+sleep 2
 exit $EXIT_CODE
 LAUNCH
     chmod +x /opt/terraria/launch.sh
@@ -548,10 +635,8 @@ LAUNCH
     # --- DISCORD COMMANDER BOT SETUP (INTERNAL) ---
     if [ -n "$BOT_CODE" ]; then
         echo "Setting up Internal Discord Bot..."
-        # Use quoted heredoc to safely write python code without shell expansion
-        cat > /opt/terraria/discord_bot.py <<'PYTHON_BOT'
-$BOT_CODE
-PYTHON_BOT
+        # Dump the env var directly to file to avoid heredoc expansion issues
+        printenv BOT_CODE > /opt/terraria/discord_bot.py
     fi
     
     # Finalize Bot Installation (Inside Container)
@@ -567,11 +652,20 @@ PYTHON_BOT
     ZIP_FILE="terraria-server.zip"
     URL="https://terraria.org/api/download/pc-dedicated-server/terraria-server-$TERRARIA_VERSION.zip"
     
-    echo "Downloading Terraria Server $TERRARIA_VERSION..."
-    if command -v wget >/dev/null 2>&1; then
-        wget -q -O "$ZIP_FILE" "$URL"
+    # Download or Copy Configuration
+    ZIP_FILE="terraria-server.zip"
+    
+    if [ -f "/tmp/terraria_local.zip" ]; then
+        echo "Using local server package..."
+        mv /tmp/terraria_local.zip "$ZIP_FILE"
     else
-        curl -L -o "$ZIP_FILE" "$URL"
+        URL="https://terraria.org/api/download/pc-dedicated-server/terraria-server-$TERRARIA_VERSION.zip"
+        echo "Downloading Terraria Server $TERRARIA_VERSION..."
+        if command -v wget >/dev/null 2>&1; then
+            wget -q -O "$ZIP_FILE" "$URL"
+        else
+            curl -L -o "$ZIP_FILE" "$URL"
+        fi
     fi
     
     echo "Extracting..."
@@ -611,6 +705,14 @@ PYTHON_BOT
     
     # Generate Config
     echo "Generating serverconfig.txt..."
+    
+    # Backup existing config if present to avoid losing manual customizations
+    if [ -f "serverconfig.txt" ]; then
+        echo "Backing up existing serverconfig.txt to serverconfig.txt.bak"
+        cp serverconfig.txt serverconfig.txt.bak
+        chown terraria:terraria serverconfig.txt.bak
+    fi
+
     cat > serverconfig.txt <<CONFIG
 port=$SERVER_PORT
 maxplayers=$MAX_PLAYERS

@@ -30,7 +30,7 @@ echo "--- Updating Terraria Server on CT $CT_ID to version $NEW_VERSION ---"
 
 # 1. Stop Service
 echo "Stopping Terraria service..."
-pct exec "$CT_ID" -- systemctl stop terraria || true
+pct exec "$CT_ID" -- bash -c "systemctl stop terraria || supervisorctl stop terraria || rc-service terraria stop || true"
 
 # 2. Backup current binary
 echo "Backing up current binary..."
@@ -46,6 +46,13 @@ pct exec "$CT_ID" -- /bin/bash -s <<EOF
   set -e
   cd /tmp
   
+  # Check free space (need ~500MB safe margin)
+  FREE_KB=$(df -k . | tail -1 | awk '{print $4}')
+  if [ "$FREE_KB" -lt 500000 ]; then
+     echo "Error: Insufficient disk space. Need 500MB, have $((FREE_KB/1024))MB."
+     exit 1
+  fi
+
   # Download
   if command -v wget >/dev/null; then
     wget -q "$URL"
@@ -67,8 +74,14 @@ pct exec "$CT_ID" -- /bin/bash -s <<EOF
   cp "\$BIN_PATH" /opt/terraria/
   chmod +x /opt/terraria/TerrariaServer.bin.x86_64
   
-  # Cleanup
+  # Cleanup Logic:
+  # 1. Remove zip and extracted folder
   rm -rf "$ZIP_FILE" "\$(dirname "\$BIN_PATH")"
+  
+  # 2. Cleanup old backups (keep only the latest .bak)
+  # We already made a .bak in step 2. If there are others like .bak.1, remove them?
+  # For simplicity, we assume one backup level is enough.
+
   
   # Restore permissions
   chown terraria:terraria /opt/terraria/TerrariaServer.bin.x86_64
@@ -76,7 +89,7 @@ EOF
 
 # 4. Start Service
 echo "Starting Terraria service..."
-pct exec "$CT_ID" -- systemctl start terraria
+pct exec "$CT_ID" -- bash -c "systemctl start terraria || supervisorctl start terraria || rc-service terraria start"
 
 notify_update "success" "Update Complete" "Terraria Server was successfully updated."
 

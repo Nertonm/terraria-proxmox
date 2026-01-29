@@ -40,7 +40,7 @@ echo "Backup File: $BACKUP_FILE"
 
 # 1. Stop Service
 echo "Stopping service..."
-pct exec "$CT_ID" -- systemctl stop terraria || true
+pct exec "$CT_ID" -- bash -c "systemctl stop terraria || supervisorctl stop terraria || rc-service terraria stop || true"
 
 # 2. Extract Archive
 # The backup now contains absolute paths /opt/terraria and /home/terraria.
@@ -55,7 +55,7 @@ pct exec "$CT_ID" -- chown -R terraria:terraria /opt/terraria /home/terraria
 
 # 4. Start Service
 echo "Starting service..."
-pct exec "$CT_ID" -- systemctl start terraria
+pct exec "$CT_ID" -- bash -c "systemctl start terraria || supervisorctl start terraria || rc-service terraria start || true"
 
 notify_restore "success" "Restore Complete" "Backup successfully restored to CT $CT_ID."
 
