@@ -385,6 +385,66 @@ pct exec "$CT_ID" -- env \
   /bin/sh -s <<'EOF'
     set -e
     
+    # Ensure DNS resolution via fallback if DHCP failed to provide it
+    if ! ping -c 1 google.com >/dev/null 2>&1; then
+        echo "Network check failed. Forcing DNS 8.8.8.8 in /etc/resolv.conf..."
+        echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    fi
+
+    echo "Detecting Package Manager..."
+    if command -v apk >/dev/null 2>&1; then
+        echo "Alpine detected."
+        apk update
+        apk add --no-cache bash findutils icu-libs wget unzip tmux curl ca-certificates iproute2
+    elif command -v apt-get >/dev/null 2>&1; then
+      echo "Debian/Ubuntu detected."
+      apt-get update
+      apt-get install -y wget unzip tmux libicu-dev supervisor curl ca-certificates iproute2
+    elif command -v dnf >/dev/null 2>&1; then
+        echo "Fedora/RHEL detected."
+        dnf install -y wget unzip tmux libicu curl ca-certificates iproute
+    else
+        echo "Error: No supported package manager found (apk, apt, dnf)."
+        exit 1
+    fi
+    
+    # Create User 'terraria' with predictable home and shell
+    if ! id -u terraria >/dev/null 2>&1; then
+      echo "Creating user terraria..."
+      if command -v apk >/dev/null 2>&1; then
+         # Alpine
+         adduser -D -h /home/terraria -s /bin/sh terraria
+      else
+         # Debian/Ubuntu/Fedora/Other -> prefer useradd
+         # -m creates home, -U creates a group with the same name
+         useradd -m -d /home/terraria -s /bin/bash -U terraria || \
+         useradd -m -d /home/terraria -s /bin/sh -U terraria || \
+         useradd -m -s /bin/sh terraria
+      fi
+    fi
+
+    # Determine the terraria user's home directory and ensure it's present
+    TERRARIA_HOME=$(getent passwd terraria | cut -d: -f6 || true)
+    if [ -z "${TERRARIA_HOME}" ]; then
+      TERRARIA_HOME="/home/terraria"
+    fi
+    mkdir -p "$TERRARIA_HOME" 2>/dev/null || true
+    chown -R terraria:terraria "$TERRARIA_HOME" || true
+
+    # Optionally add `terraria` to a supplementary group (default: games)
+    TERRARIA_GROUP=${TERRARIA_GROUP:-games}
+    if getent group "$TERRARIA_GROUP" >/dev/null 2>&1; then
+      if command -v usermod >/dev/null 2>&1; then
+        usermod -aG "$TERRARIA_GROUP" terraria || true
+      elif command -v adduser >/dev/null 2>&1; then
+        # adduser syntax varies; try this form as a fallback
+        adduser terraria "$TERRARIA_GROUP" >/dev/null 2>&1 || true
+      fi
+    fi
+    
+    mkdir -p /opt/terraria
+    cd /opt/terraria
+    
     # Save Discord URL for internal scripts (launch.sh)
     if [ -n "$DISCORD_URL" ]; then
        echo "$DISCORD_URL" > /opt/terraria/.discord_url
@@ -447,67 +507,8 @@ fi
 exit $EXIT_CODE
 LAUNCH
     chmod +x /opt/terraria/launch.sh
-    
-    # Ensure DNS resolution via fallback if DHCP failed to provide it
-    if ! ping -c 1 google.com >/dev/null 2>&1; then
-        echo "Network check failed. Forcing DNS 8.8.8.8 in /etc/resolv.conf..."
-        echo "nameserver 8.8.8.8" > /etc/resolv.conf
-    fi
+    chown terraria:terraria /opt/terraria/launch.sh
 
-    echo "Detecting Package Manager..."
-    if command -v apk >/dev/null 2>&1; then
-        echo "Alpine detected."
-        apk update
-        apk add --no-cache bash findutils icu-libs wget unzip tmux curl ca-certificates iproute2
-    elif command -v apt-get >/dev/null 2>&1; then
-      echo "Debian/Ubuntu detected."
-      apt-get update
-      apt-get install -y wget unzip tmux libicu-dev supervisor curl ca-certificates iproute2
-    elif command -v dnf >/dev/null 2>&1; then
-        echo "Fedora/RHEL detected."
-        dnf install -y wget unzip tmux libicu curl ca-certificates iproute
-    else
-        echo "Error: No supported package manager found (apk, apt, dnf)."
-        exit 1
-    fi
-    
-    # Create User 'terraria' with predictable home and shell
-    if ! id -u terraria >/dev/null 2>&1; then
-      echo "Creating user terraria..."
-      if command -v apk >/dev/null 2>&1; then
-         # Alpine
-         adduser -D -h /home/terraria -s /bin/sh terraria
-      else
-         # Debian/Ubuntu/Fedora/Other -> prefer useradd
-         # -m creates home, -U creates a group with the same name
-         useradd -m -d /home/terraria -s /bin/bash -U terraria || \
-         useradd -m -d /home/terraria -s /bin/sh -U terraria || \
-         useradd -m -s /bin/sh terraria
-      fi
-    fi
-
-    # Determine the terraria user's home directory and ensure it's present
-    TERRARIA_HOME=$(getent passwd terraria | cut -d: -f6 || true)
-    if [ -z "${TERRARIA_HOME}" ]; then
-      TERRARIA_HOME="/home/terraria"
-    fi
-    mkdir -p "$TERRARIA_HOME" 2>/dev/null || true
-    chown -R terraria:terraria "$TERRARIA_HOME" || true
-
-    # Optionally add `terraria` to a supplementary group (default: games)
-    TERRARIA_GROUP=${TERRARIA_GROUP:-games}
-    if getent group "$TERRARIA_GROUP" >/dev/null 2>&1; then
-      if command -v usermod >/dev/null 2>&1; then
-        usermod -aG "$TERRARIA_GROUP" terraria || true
-      elif command -v adduser >/dev/null 2>&1; then
-        # adduser syntax varies; try this form as a fallback
-        adduser terraria "$TERRARIA_GROUP" >/dev/null 2>&1 || true
-      fi
-    fi
-    
-    mkdir -p /opt/terraria
-    cd /opt/terraria
-    
     # Download
     ZIP_FILE="terraria-server.zip"
     URL="https://terraria.org/api/download/pc-dedicated-server/terraria-server-$TERRARIA_VERSION.zip"
