@@ -8,6 +8,7 @@ Agora com suporte **Multi-Distro** (Debian, Ubuntu, Alpine, Fedora) e resiliênc
 
 - **🛡️ Instalação Resiliente:** Suporte nativo a containers privilegiados e não-privilegiados, com detecção automática de init system (`systemd`, `openrc`, `supervisor`).
 - **🔧 Auto-Repair de Mundo:** O servidor detecta se o mundo sumiu ou corrompeu e tenta regenerá-lo automaticamente na inicialização, prevenindo "Crash Loops".
+- **⚙️ Configuração Granular:** Controle total via flags: Senha, MOTD, Prioridade, UPnP, Idioma, Banlist, NPC Streaming e Permissões Journey.
 - **💬 Integração Rica com Discord:**
     - **Webhooks:** Notificações coloridas para Status (ON/OFF), Crash, Backups e Updates.
     - **Bot Bidirecional:** Controle o servidor via chat (`!start`, `!stop`, `!restart`, `!status`).
@@ -35,7 +36,13 @@ chmod +x install.sh scripts/*.sh
   --world-name "TerrariaWorld" \
   --size 2 \
   --difficulty 1 \
-  --evil 1 \
+  --password "mypassword" \
+  --motd "Welcome to my Server" \
+  --secure \
+  --upnp \
+  --priority 1 \
+  --language "en-US" \
+  --journey-permission 2 \
   --enable-backup \
   --backup-schedule "6h" \
   --enable-monitor \
@@ -55,6 +62,16 @@ chmod +x install.sh scripts/*.sh
 | `--size` | Tamanho do Mundo (1=Small, 2=Medium, 3=Large) | `2` |
 | `--difficulty` | Dificuldade (0=Classic, 1=Expert, 2=Master) | `1` |
 | `--evil` | Bioma (1=Random, 2=Corrupt, 3=Crimson) | `2` |
+| `--password` | Senha do servidor | `s3cr3t` |
+| `--motd` | Mensagem do dia | `"Hello World"` |
+| `--secure` | Ativa proteção anti-cheat | - |
+| `--priority` | Prioridade do Processo (0-5, 0=Realtime, 1=High) | `1` |
+| `--upnp` | Ativa redirecionamento de porta automático | - |
+| `--language` | Idioma do servidor (ex: `en-US`, `pt-BR`) | `en-US` |
+| `--banlist` | Nome do arquivo de banimentos | `banlist.txt` |
+| `--npcstream` | Reduz skipping de inimigos (0: Off, 60: Default) | `60` |
+| `--journey-permission` | Permissões Journey (0: Locked, 1: Host, 2: Todos) | `2` |
+| `--autocreate` | Cria o mundo automaticamente (usa `--size`) | - |
 | `--enable-backup` | Ativa a rotina de backups automáticos | - |
 | `--backup-schedule` | Frequência (`daily`, `hourly`, `6h`, `weekly`) | `6h` |
 | `--enable-monitor` | Ativa alertas de saúde (RAM/Disco) | - |

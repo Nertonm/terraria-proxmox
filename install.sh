@@ -40,6 +40,12 @@ PASSWORD=${PASSWORD:-""}
 MOTD=${MOTD:-"Welcome explicitly"}
 SECURE=${SECURE:-0}
 AUTOCREATE=${AUTOCREATE:-0}
+PRIORITY=${PRIORITY:-1}
+UPNP=${UPNP:-0}
+LANGUAGE=${LANGUAGE:-"en-US"}
+BANLIST=${BANLIST:-"banlist.txt"}
+NPCSTREAM=${NPCSTREAM:-""}
+JOURNEY_PERM=${JOURNEY_PERM:-2} # 0=Locked, 1=Host, 2=Everyone
 
 # Host Integrations
 ENABLE_BACKUP=${ENABLE_BACKUP:-0}
@@ -79,6 +85,15 @@ Options:
   --evil TYPE              World Evil (1=Random, 2=Corrupt, 3=Crimson)
   --seed TEXT              World Seed
   --secret-seed TEXT       Enable Secret Seed (e.g. 'not the bees')
+  --password PASS          Server password
+  --motd "MSG"             Message of the Day
+  --secure                 Enable Cheat Protection (default: off)
+  --priority N             Process Priority 0-5 (default: 1)
+  --upnp                   Enable UPnP (default: off)
+  --language LANG          Language (default: en-US)
+  --banlist FILE           Banlist filename (default: banlist.txt)
+  --npcstream N            Reduce enemy skipping (default: 60)
+  --journey-permission N   Journey Mode Defaults (0=Locked, 1=Host, 2=All)
   --autocreate             Enable auto-creation of world if missing
   --enable-backup          Enable automated backups
   --backup-schedule TYPE   Schedule: daily, hourly, 6h, weekly, or "cron expr" (def: daily)
@@ -115,6 +130,15 @@ while [ "$#" -gt 0 ]; do
     --evil) WORLD_EVIL="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
     --secret-seed) SECRET_SEED="$2"; shift 2 ;;
+    --password) PASSWORD="$2"; shift 2 ;;
+    --motd) MOTD="$2"; shift 2 ;;
+    --secure) SECURE=1; shift ;;
+    --priority) PRIORITY="$2"; shift 2 ;;
+    --upnp) UPNP=1; shift ;;
+    --language) LANGUAGE="$2"; shift 2 ;;
+    --banlist) BANLIST="$2"; shift 2 ;;
+    --npcstream) NPCSTREAM="$2"; shift 2 ;;
+    --journey-permission) JOURNEY_PERM="$2"; shift 2 ;;
     --autocreate) AUTOCREATE_FLAG=1; shift ;;
     --enable-backup) ENABLE_BACKUP=1; shift ;;
     --backup-schedule) ENABLE_BACKUP=1; BACKUP_SCHEDULE="$2"; shift 2 ;;
@@ -460,6 +484,12 @@ pct exec "$CT_ID" -- env \
   BOT_TOKEN="$BOT_TOKEN" \
   BOT_USER_ID="$BOT_USER_ID" \
   BOT_CODE="$BOT_CODE" \
+  PRIORITY="$PRIORITY" \
+  UPNP="$UPNP" \
+  LANGUAGE="$LANGUAGE" \
+  BANLIST="$BANLIST" \
+  NPCSTREAM="$NPCSTREAM" \
+  JOURNEY_PERM="$JOURNEY_PERM" \
   LC_ALL=C \
   /bin/sh -s <<'EOF'
     set -e
@@ -599,24 +629,30 @@ if [ -n "$WORLD_PATH" ]; then
         notify "Auto-Repair" 16776960 "World file missing. Attempting emergency generation..."
         
         # Extract config values for generation
-        W_NAME=$(grep "worldname=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs)
+        W_NAME=$(grep "worldname=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
         [ -z "$W_NAME" ] && W_NAME="TerrariaRequest"
-        
-        # Generator Inputs: n, Size(2), Diff(1), Evil(1), Name, Seed, Secret...
-        cat > "$DIR/autogen.in" <<SETUP
-n
-2
-1
-1
-$W_NAME
 
+        # Try to match difficulty (Config 0-3)
+        W_DIFF_C=$(grep "difficulty=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
+        [ -z "$W_DIFF_C" ] && W_DIFF_C=0
 
-exit
-SETUP
+        # Try to match size (Config autocreate=1,2,3) - Default to 2 (Medium)
+        W_SIZE_C=$(grep "autocreate=" "$CONF" | cut -d= -f2 | tr -d '\r' | xargs | head -n1)
+        if [[ "$W_SIZE_C" =~ ^[1-3]$ ]]; then
+            W_SIZE="$W_SIZE_C"
+        else
+            W_SIZE="2"
+        fi
         
-        echo "Running generation..."
-        "$BIN" -config "$CONF" < "$DIR/autogen.in" > "$DIR/gen.log" 2>&1
-        rm -f "$DIR/autogen.in"
+        echo "Running generation via CLI params..."
+        # We use -config to load settings, but override autocreate to force generation
+        # This bypasses the 'LoadWorld' crash because the server knows it's in generation mode
+        "$BIN" -config "$CONF" \
+            -autocreate "$W_SIZE" \
+            -worldname "$W_NAME" \
+            -difficulty "$W_DIFF_C" > "$DIR/gen.log" 2>&1
+            
+        # Check result
         
         if [ -s "$WORLD_PATH" ]; then
              notify "Auto-Repair Success" 3066993 "World generated successfully. Starting server..."
@@ -767,64 +803,90 @@ LAUNCH
     
     chown -R terraria:terraria /opt/terraria
     
-    # Generate Config
+    chown -R terraria:terraria /opt/terraria
+    
+    # --- Prepare World Paths (Moved up for Config Generation) ---
+    TERRARIA_HOME=${TERRARIA_HOME:-/home/terraria}
+    WORLD_FILE="$TERRARIA_HOME/.local/share/Terraria/Worlds/${WORLD_NAME}.wld"
+    WORLD_DIR="$(dirname "$WORLD_FILE")"
+
+    # Ensure directories exist
+    mkdir -p "$WORLD_DIR" /opt/terraria/Worlds 2>/dev/null || true
+    chown -R terraria:terraria "$WORLD_DIR" /opt/terraria/Worlds || true
+    
+    # Compatibility link for some setups
+    mkdir -p /root/.local/share/Terraria/Worlds 2>/dev/null || true
+
+    # Generate Config (Standardized)
     echo "Generating serverconfig.txt..."
     
-    # Backup existing config if present to avoid losing manual customizations
+    # Backup existing config if present
     if [ -f "serverconfig.txt" ]; then
-        echo "Backing up existing serverconfig.txt to serverconfig.txt.bak"
         cp serverconfig.txt serverconfig.txt.bak
         chown terraria:terraria serverconfig.txt.bak
+    fi
+
+    # Prepare Config Lines
+    NPCSTREAM_LINE=""
+    if [ -n "$NPCSTREAM" ]; then
+        NPCSTREAM_LINE="npcstream=$NPCSTREAM"
+    fi
+    
+    AUTOCREATE_LINE=""
+    # Only adding autocreate if it is 1, 2, or 3. 0 means disabled.
+    if [[ "$AUTOCREATE" =~ ^[1-3]$ ]]; then
+        AUTOCREATE_LINE="autocreate=$AUTOCREATE"
     fi
 
     cat > serverconfig.txt <<CONFIG
 # Terraria Server Configuration
 # Generated by Terraria-Proxmox Manager
 
-# Network
+# --- Network ---
 port=$SERVER_PORT
 maxplayers=$MAX_PLAYERS
 upnp=0
+priority=1
 
-# World Settings
+# --- World Settings ---
+world=$WORLD_FILE
+worldpath=$WORLD_DIR
 worldname=$WORLD_NAME
-autocreate=$AUTOCREATE
+difficulty=$DIFFICULTY
+$AUTOCREATE_LINE
 seed=$SEED
-difficulty=$DIFFICULTY  # 0=Classic, 1=Expert, 2=Master, 3=Journey
 
-# Security & Access
+# --- Security ---
 password=$PASSWORD
 motd=${MOTD:-"Welcome to Terraria Server!"}
 secure=$SECURE
+banlist=banlist.txt
 
-# World File Path (Critical for automation)
-# world=/path/to/world.wld (Populated automatically by launch script if missing)
+# --- System ---
+language=en-US
+$NPCSTREAM_LINE
+
+# --- Journey Mode Permissions ---
+journeypermission_time_setfrozen=$JOURNEY_PERM
+journeypermission_time_setdawn=$JOURNEY_PERM
+journeypermission_time_setnoon=$JOURNEY_PERM
+journeypermission_time_setdusk=$JOURNEY_PERM
+journeypermission_time_setmidnight=$JOURNEY_PERM
+journeypermission_godmode=$JOURNEY_PERM
+journeypermission_wind_setstrength=$JOURNEY_PERM
+journeypermission_rain_setstrength=$JOURNEY_PERM
+journeypermission_time_setspeed=$JOURNEY_PERM
+journeypermission_rain_setfrozen=$JOURNEY_PERM
+journeypermission_wind_setfrozen=$JOURNEY_PERM
+journeypermission_increaseplacementrange=$JOURNEY_PERM
+journeypermission_setdifficulty=$JOURNEY_PERM
+journeypermission_biomespread_setfrozen=$JOURNEY_PERM
+journeypermission_setspawnrate=$JOURNEY_PERM
 CONFIG
     chown terraria:terraria serverconfig.txt
 
-    # Ensure a writable world file path exists and is referenced in the config
-    # Use the terraria user's home if available; create both terraria and root fallbacks
-    TERRARIA_HOME=${TERRARIA_HOME:-/home/terraria}
-    WORLD_FILE="$TERRARIA_HOME/.local/share/Terraria/Worlds/${WORLD_NAME}.wld"
-    WORLD_DIR="$(dirname \"$WORLD_FILE\")"
-    mkdir -p "$WORLD_DIR" 2>/dev/null || true
-    chown -R terraria:terraria "$WORLD_DIR" || true
-
-    # Also create the root fallback used on some templates (Alpine default)
-    mkdir -p /root/.local/share/Terraria/Worlds 2>/dev/null || true
-
-    # Append world= only if not already present in config
-    if ! grep -Eq '^world=' serverconfig.txt 2>/dev/null; then
-      echo "world=$WORLD_FILE" >> serverconfig.txt
-      chown terraria:terraria serverconfig.txt || true
-    fi
-
-    # Ensure world directories and ownerships for common Terraria locations
-    echo "Ensuring Worlds directories and ownership..."
-    for p in "/opt/terraria/Worlds" "/opt/terraria/Terraria/Worlds" "/home/terraria/.local/share/Terraria/Worlds"; do
-      mkdir -p "$p" 2>/dev/null || true
-      chown -R terraria:terraria "$p" || true
-    done
+    # Cleanup redundant actions (paths are already handled above)
+    echo "Configuration written to serverconfig.txt"
 
     # If no worlds exist, FORCE a generation run to prevent service crash on first boot.
     # We use input injection to answer the "Choose World" prompt that appears when the configured world is missing.
