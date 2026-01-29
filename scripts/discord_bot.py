@@ -5,6 +5,7 @@ import signal
 import re
 import aiohttp
 import datetime
+import shutil
 from discord.ext import commands
 
 # --- CONFIGURATION (INTERNAL) ---
@@ -16,6 +17,7 @@ except ValueError:
 
 # Configuration for Host Mode
 CT_ID = os.getenv('CT_ID')
+HAS_PCT = shutil.which('pct') is not None
 SERVER_DIR = "/opt/terraria"
 LOG_FILE = f"{SERVER_DIR}/server_output.log"
 CONFIG_FILE = f"{SERVER_DIR}/serverconfig.txt"
@@ -30,7 +32,7 @@ bot.remove_command('help') # Remove default help to use custom one
 async def run_shell_async(command):
     # ... (unchanged) ...
     try:
-        if CT_ID:
+        if CT_ID and HAS_PCT:
             safe_command = command.replace("'", "'\\''")
             full_command = f"pct exec {CT_ID} -- bash -c '{safe_command}'"
         else:
@@ -46,7 +48,40 @@ async def run_shell_async(command):
     except Exception as e:
         return f"Error: {str(e)}"
 
-# ... (Helpers unchanged) ...
+
+async def get_public_ip():
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://api.ipify.org', timeout=5) as resp:
+                IP = await resp.text()
+                return IP.strip()
+    except Exception as e:
+        print(f"Failed to get IP: {e}")
+        return "Unknown IP"
+
+async def get_server_info():
+    info = {'world': 'Unknown', 'port': '7777'}
+    try:
+        # Read config via shell (cat) to support both Host and Container modes
+        content = await run_shell_async(f"cat {CONFIG_FILE}")
+        
+        if not content or "No such file" in content:
+            return info
+            
+        for line in content.split('\n'):
+            line = line.strip()
+            if line.startswith("world="):
+                # Format: world=/path/to/WorldName.wld
+                path = line.split("=", 1)[1]
+                info['world'] = os.path.basename(path).replace(".wld", "")
+            elif line.startswith("port="):
+                info['port'] = line.split("=", 1)[1]
+    except Exception as e:
+        print(f"Error parsing serverconfig: {e}")
+        
+    return info
+
+
 
 @bot.event
 async def on_ready():
@@ -59,8 +94,20 @@ async def on_ready():
             with open(CHANNEL_ID_FILE, 'r') as f:
                 LOG_CHANNEL_ID = int(f.read().strip())
             print(f"Restored Monitor Channel ID: {LOG_CHANNEL_ID}")
-        except:
-            print("Failed to restore channel ID.")
+            
+            # Startup Notification
+            channel = bot.get_channel(LOG_CHANNEL_ID)
+            if channel:
+                embed = discord.Embed(
+                    title="🤖 Bot Online", 
+                    description="O Gerenciador Terraria está ativo.", 
+                    color=discord.Color.blue()
+                )
+                embed.add_field(name="Ping", value=f"{round(bot.latency * 1000)}ms", inline=True)
+                embed.timestamp = datetime.datetime.now()
+                await channel.send(embed=embed)
+        except Exception as e:
+            print(f"Failed to restore channel or send startup msg: {e}")
 
     if not hasattr(bot, 'status_task'):
         bot.status_task = bot.loop.create_task(update_status_task())
@@ -69,6 +116,32 @@ async def on_ready():
 
 # Global variable to store the channel receiving updates
 LOG_CHANNEL_ID = None
+
+@bot.event
+async def on_message(message):
+    # Avoid bot self-loops
+    if message.author.bot: return
+    
+    # Process Commands first
+    await bot.process_commands(message)
+    
+    # Chat Bridge: Discord -> Terraria
+    # Only if channel checks out and it's not a command
+    if LOG_CHANNEL_ID and message.channel.id == LOG_CHANNEL_ID:
+        if not message.content.startswith(bot.command_prefix):
+             # Sanitize message to prevent shell/tmux injection
+             clean_msg = message.content.replace("'", "").replace('"', "")
+             # Limit length
+             if len(clean_msg) > 100: clean_msg = clean_msg[:100] + "..."
+             
+             user = message.author.display_name
+             # Send to Terraria Console via 'say'
+             # Format: say [Discord] <User>: Message
+             cmd = f"say [Discord] <{user}>: {clean_msg}"
+             full_cmd = f"tmux send-keys -t terraria '{cmd}' Enter"
+             
+             # Fire and forget (don't wait for output to keep chat snappy)
+             asyncio.create_task(run_shell_async(full_cmd))
 
 @bot.command()
 async def monitor(ctx):
@@ -79,21 +152,13 @@ async def monitor(ctx):
     
     # Save Persistence
     try:
-        # If Host Mode, we need to write inside container paths appropriately or just use shell
-        # Since this bot runs INSIDE container usually (via install.sh setup), direct write is fine.
-        # But if running in Host Mode, we must use `run_shell_async` to write echo.
-        # Let's use generic run_shell_async for safety if CT_ID is set.
-        if CT_ID:
-             # Host mode write
-             await run_shell_async(f"echo {LOG_CHANNEL_ID} > {CHANNEL_ID_FILE}")
-        else:
-             # Direct write
-             with open(CHANNEL_ID_FILE, 'w') as f:
-                 f.write(str(LOG_CHANNEL_ID))
+        # Save locally (bot's environment)
+        with open(CHANNEL_ID_FILE, 'w') as f:
+            f.write(str(LOG_CHANNEL_ID))
                  
-        await ctx.send("👀 **Monitoring activated!** Channel saved as default.")
+        await ctx.send("👀 **Monitoramento ativado!** As atualizações aparecerão aqui.")
     except Exception as e:
-        await ctx.send(f"⚠️ Monitoring active but failed to save default: {e}")
+        await ctx.send(f"⚠️ Falha ao salvar canal padrão: {e}")
 
 async def log_monitor_task():
     """Continuously reads the server log for Join/Leave events."""
@@ -104,7 +169,6 @@ async def log_monitor_task():
         await asyncio.sleep(10)
     
     # Use tail -F to follow the file (works well with rotation/restarts)
-    # We use -n 0 to start reading only NEW lines
     process = await asyncio.create_subprocess_exec(
         'tail', '-F', '-n', '0', LOG_FILE,
         stdout=asyncio.subprocess.PIPE,
@@ -114,29 +178,21 @@ async def log_monitor_task():
     print("Log Monitor started.")
     
     while not bot.is_closed():
-        line_bytes = await process.stdout.readline()
-        if not line_bytes:
-            break # Process died?
-            
-        line = line_bytes.decode('utf-8', errors='ignore').strip()
-        
-        # Check if we have a destination channel
-        if LOG_CHANNEL_ID is None:
-            continue
-            
-        channel = bot.get_channel(LOG_CHANNEL_ID)
-        if not channel:
-            continue
-
-        # --- PARSING LOGIC ---
-        # Format: "Name has joined." or "IP:Port Name has joined."
-        
         try:
+            line_bytes = await process.stdout.readline()
+            if not line_bytes:
+                break 
+                
+            line = line_bytes.decode('utf-8', errors='ignore').strip()
+            
+            if LOG_CHANNEL_ID is None: continue
+            channel = bot.get_channel(LOG_CHANNEL_ID)
+            if not channel: continue
+
             timestamp = datetime.datetime.now().strftime("%H:%M")
             
+            # Logic: Join/Leave detection
             if "has joined." in line:
-                # Extract Name: Clean up IP if present
-                # Regex matches: (IP:Port )? (Name) has joined.
                 match = re.search(r'(?:\d+\.\d+\.\d+\.\d+:\d+\s+)?(.+) has joined\.', line)
                 if match:
                     player_name = match.group(1).strip()
@@ -151,9 +207,30 @@ async def log_monitor_task():
                     embed = discord.Embed(description=f"**{player_name}** saiu do mundo. 👋", color=discord.Color.red())
                     embed.set_footer(text=f"At {timestamp}")
                     await channel.send(embed=embed)
+            
+            # Chat: <Name> Message
+            elif line.startswith("<") and "> " in line:
+                 # Standard Terraria Chat: <Name> Message
+                 # Exclude [Server] or special tags if needed
+                 parts = line.split("> ", 1)
+                 if len(parts) == 2:
+                     name = parts[0][1:]
+                     msg = parts[1]
+                     # Don't echo back our own [Discord] messages if they appear in logs
+                     if "[Discord]" not in name:
+                         await channel.send(f"💬 **{name}**: {msg}")
+
+            # Death Messages (Heuristic)
+            # "Name was slain by...", "Name fell...", "Name drowned..."
+            elif any(x in line for x in [" was slain by ", " fell ", " drowned ", " burned ", " died "]):
+                 # Basic filter to ensure it's a player death event
+                 # Usually starts with PlayerName ...
+                 # We avoid lines starting with IP like "192.168... was slain" (unlikely)
+                 await channel.send(f"💀 *{line}*")
                     
         except Exception as e:
-            print(f"Log Parse Error: {e}")
+            print(f"Log monitor error: {e}")
+            await asyncio.sleep(1)
 
 async def is_authorized(ctx):
     if ALLOWED_USER_ID != 0 and ctx.author.id != ALLOWED_USER_ID:
@@ -162,22 +239,52 @@ async def is_authorized(ctx):
     return True
 
 async def update_status_task():
-    """Background task to update bot status with player count."""
+    """Background task to update bot status with player count or server state."""
     await bot.wait_until_ready()
     while not bot.is_closed():
         try:
+            # Check if server is actually running
+            pgrep = await run_shell_async("pgrep -f TerrariaServer")
+            
+            if not pgrep or "1" not in str(pgrep) and len(str(pgrep)) < 2: # Basic check
+                # Process not found
+                await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Servidor Offline"))
+                await asyncio.sleep(30) # Check less frequently if offline
+                continue
+
             # Get Player Count
             res = await run_shell_async("ss -tn state established '( sport = :7777 )' | grep -v Recv-Q | wc -l")
             count = res.strip() or "0"
             
-            # Show current count
-            activity_text = f"Terraria with {count} players"
-            
+            activity_text = f"Terraria com {count} jogadores"
             await bot.change_presence(activity=discord.Game(name=activity_text))
+            
         except Exception as e:
             print(f"Status update error: {e}")
         
-        await asyncio.sleep(60) # Update every minute
+        await asyncio.sleep(30) # Update every 30s
+
+
+@bot.command()
+async def shutdown(ctx):
+    """Desliga o bot graciosamente (Apenas Admin)."""
+    if not await is_authorized(ctx): return
+    await ctx.send("🛑 **Desligando bot...**")
+    await bot.close()
+
+@bot.command()
+async def kick(ctx, player: str, *, reason: str = "Sem motivo"):
+    """Expulsa um jogador: !kick "Nome" Motivo"""
+    if not await is_authorized(ctx): return
+    await command(ctx, cmd_text=f'kick "{player}" "{reason}"')
+
+@bot.command()
+async def ban(ctx, player: str, *, reason: str = "Sem motivo"):
+    """Bane um jogador: !ban "Nome" Motivo"""
+    if not await is_authorized(ctx): return
+    await command(ctx, cmd_text=f'ban "{player}" "{reason}"')
+
+# End of Helpers, Start of Commands
 
 @bot.command(aliases=['exec', 'cmd'])
 async def command(ctx, *, cmd_text: str):
@@ -194,11 +301,76 @@ async def command(ctx, *, cmd_text: str):
     full_cmd = f"tmux send-keys -t terraria '{cmd_text}' Enter"
     
     async with ctx.typing():
+        # Capture current log size
+        log_size_before = 0
+        if os.path.exists(LOG_FILE):
+             try:
+                 log_size_before = os.path.getsize(LOG_FILE)
+             except: pass
+
         res = await run_shell_async(full_cmd)
-        if not res:
-            await ctx.send(f"Evocado ao console: `/{cmd_text}`")
+        
+        if res:
+             await ctx.send(f"⚠️ Erro ao enviar: `{res}`")
+             return
+
+        # Wait for execution and read new log lines
+        await asyncio.sleep(1.0)
+        
+        try:
+             # tail the bytes added since log_size_before
+             # easier method: just tail last 10 lines and try to find relevance, 
+             # or just show last few lines. Suffixing command with unique ID is hard in tmux.
+             # We will show the last 6 lines.
+             logs = await run_shell_async(f"tail -n 6 {LOG_FILE}")
+             await ctx.send(f"✅ **Enviado:** `{cmd_text}`\n**Console Output:**\n```bash\n{logs}\n```")
+        except:
+             await ctx.send(f"✅ **Enviado:** `{cmd_text}` (Logs indisponíveis)")
+
+@bot.command()
+async def update(ctx, version: str):
+    """Atualiza o servidor: !update 1450"""
+    if not await is_authorized(ctx): return
+    
+    # regex validator for simple version (digits with optional dots)
+    if not re.match(r'^\d+$', version):
+        await ctx.send("⚠️ Formato de versão inválido. Use apenas números (ex: `1450` para 1.4.5.0).")
+        return
+
+    await ctx.send(f"🔄 **Iniciando atualização para v{version}...**\nIsso pode levar alguns minutos. O servidor ficará offline.")
+    
+    # We are running inside the container or on host.
+    # The update_terraria.sh expects CT_ID as argument 1.
+    # If we are INSIDE the container, we don't use pct exec.
+    # However, existing script uses `pct exec`. This implies the BOT is meant to run on HOST.
+    # BUT `setup_bot.sh` installs it inside container? No, `setup_bot.sh` has `CT_ID` var but installs locally?
+    # Wait, `setup_bot.sh` installs to `$PROJECT_DIR`.
+    # If the bot runs ON HOST, it can use `pct exec`.
+    # If the bot runs INSIDE container, `pct` command won't exist.
+    
+    # Check if we have 'pct'
+    check_pct = await run_shell_async("which pct")
+    
+    cmd = ""
+    if "pct" in check_pct and CT_ID:
+        # Running on Host
+        cmd = f"{os.getcwd()}/scripts/update_terraria.sh {CT_ID} {version}"
+    else:
+        # Running inside container? 
+        # The update script uses `pct exec`. It is NOT designed to run inside container.
+        # We must warn user.
+        await ctx.send("⚠️ Este bot está rodando dentro do container (provavelmente). O script de atualização requer execução no Host Proxmox.")
+        return
+
+    async with ctx.typing():
+        res = await run_shell_async(cmd)
+        
+        if "Update Complete" in res:
+             await ctx.send("✅ **Atualização Concluída com Sucesso!**\nVerifique o `!status`.")
         else:
-            await ctx.send(f"⚠️ Erro ao enviar: `{res}`")
+             # Crop long output
+             if len(res) > 1800: res = res[-1800:]
+             await ctx.send(f"❌ **Erro na Atualização:**\n```bash\n{res}\n```")
 
 @bot.command()
 async def say(ctx, *, msg: str):
@@ -260,8 +432,44 @@ async def send_status_embed(ctx):
         embed.add_field(name="💾 RAM Usage", value=mem.strip(), inline=True)
         embed.add_field(name="⏱️ Uptime", value=uptime.strip().replace("up ", ""), inline=True)
         
-        embed.set_footer(text="Terraria Proxmox Manager")
-        await ctx.send(embed=embed)
+        embed.set_footer(text="Terraria Proxmox Manager • Interactive Mode")
+        
+        view = ServerControlView(ctx)
+        await ctx.send(embed=embed, view=view)
+
+class ServerControlView(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("⛔ Estes botões não são para você!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Iniciar", style=discord.ButtonStyle.success, emoji="▶️")
+    async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("🚀 Iniciando servidor...", ephemeral=True)
+        await run_shell_async("systemctl start terraria")
+        
+    @discord.ui.button(label="Reiniciar", style=discord.ButtonStyle.primary, emoji="🔄")
+    async def restart_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("🔄 Reiniciando servidor...", ephemeral=True)
+        await run_shell_async("systemctl restart terraria")
+
+    @discord.ui.button(label="Parar", style=discord.ButtonStyle.danger, emoji="🛑")
+    async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("🛑 Parando servidor...", ephemeral=True)
+        await run_shell_async("systemctl stop terraria")
+        
+    @discord.ui.button(label="Status", style=discord.ButtonStyle.secondary, emoji="📊")
+    async def status_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Refresh the status view by calling send_status_embed again
+        # We can't edit the original easily without passing message ref, so we send a new one.
+        # Or ideally, we edit the interaction message.
+        await interaction.response.defer()
+        await send_status_embed(self.ctx)
 
 @bot.command(aliases=['log'])
 async def logs(ctx, lines: int = 15):
@@ -380,13 +588,15 @@ async def backup(ctx):
 @bot.command(name="help")
 async def help_command(ctx):
     """Shows this help message."""
-    embed = discord.Embed(title="🤖 Terraria Bot Commands", description="Control your server directly from Discord.", color=discord.Color.blue())
+    embed = discord.Embed(title="🤖 Comandos Terraria Bot", description="Controle seu servidor diretamente pelo Discord.", color=discord.Color.blue())
     
-    embed.add_field(name="🎮 **Management**", value="`!status` - Server Info & Players\n`!start` - Start Server\n`!stop` - Stop Server\n`!restart` - Instant Reboot\n`!reboot [min]` - Graceful Restart", inline=False)
+    embed.add_field(name="🎮 **Gerenciamento**", value="`!status` - Info do Servidor & Jogadores\n`!start` - Iniciar Servidor\n`!stop` - Parar Servidor\n`!restart` - Reinício Instantâneo\n`!reboot [min]` - Reinício Suave com Aviso", inline=False)
     
-    embed.add_field(name="🛠️ **Maintenance**", value="`!backup` - Manual World Backup\n`!storage` - Check Backup/World Sizes\n`!logs [lines]` - View Server Logs\n`!save` - Force Save World", inline=False)
+    embed.add_field(name="🛠️ **Manutenção**", value="`!update <ver>` - Atualizar servidor\n`!backup` - Backup Manual do Mundo\n`!storage` - Ver Tamanho de Disco\n`!logs [linhas]` - Ver Logs do Servidor\n`!save` - Forçar Salvamento", inline=False)
     
-    embed.add_field(name="💬 **Console**", value="`!say <msg>` - Message Players\n`!cmd <command>` - RCON/Console Command", inline=False)
+    embed.add_field(name="👮 **Moderação**", value="`!kick <nome> [motivo]` - Expulsar Jogador\n`!ban <nome> [motivo]` - Banir Jogador", inline=False)
+
+    embed.add_field(name="💬 **Console**", value="`!say <msg>` - Enviar Mensagem no Chat\n`!cmd <comando>` - Comando RCON/Console", inline=False)
     
     embed.set_thumbnail(url="https://terraria.org/assets/terraria-logo.png")
     embed.set_footer(text="Terraria Proxmox Manager")
@@ -428,14 +638,14 @@ async def reboot(ctx, minutes: int = 5):
     
     if minutes < 1: minutes = 1
     
-    await ctx.send(f"⏳ **Scheduled Graceful Restart in {minutes} minutes.**")
+    await ctx.send(f"⏳ **Reinício Suave Agendado em {minutes} minutos.**")
     
     # Countdown
     for i in range(minutes, 0, -1):
         # Notify in-game
-        msg = f"say [Server] Restarting in {i} minute(s)... Save your items!"
+        msg = f"say [Server] Reiniciando em {i} minuto(s)... Salve seus itens!"
         if i == 1:
-             msg = f"say [Server] Restarting in 60 seconds! FINAL WARNING!"
+             msg = f"say [Server] Reiniciando em 60 segundos! AVISO FINAL!"
              
         await run_shell_async(f"tmux send-keys -t terraria '{msg}' Enter")
         
@@ -444,11 +654,11 @@ async def reboot(ctx, minutes: int = 5):
              await asyncio.sleep(60)
 
     # Final Save
-    await run_shell_async("tmux send-keys -t terraria 'say [Server] Saving world...' Enter")
+    await run_shell_async("tmux send-keys -t terraria 'say [Server] Salvando mundo...' Enter")
     await run_shell_async("tmux send-keys -t terraria 'save' Enter")
     await asyncio.sleep(2)
     
-    await ctx.send("🔄 **Restarting now...**")
+    await ctx.send("🔄 **Reiniciando agora...**")
     await run_shell_async("systemctl restart terraria")
     await wait_and_verify(ctx, "Restart", verify_running=True)
 
