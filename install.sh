@@ -395,6 +395,9 @@ pct exec "$CT_ID" -- env \
   /bin/sh -s <<'EOF'
     set -e
     
+    mkdir -p /opt/terraria
+    cd /opt/terraria
+    
     # Save Discord URL for internal scripts (launch.sh)
     if [ -n "$DISCORD_URL" ]; then
        echo "$DISCORD_URL" > /opt/terraria/.discord_url
@@ -530,73 +533,7 @@ LAUNCH
       fi
     fi
     
-    mkdir -p /opt/terraria
-    cd /opt/terraria
     
-    # Save Discord URL for internal scripts (launch.sh)
-    if [ -n "$DISCORD_URL" ]; then
-       echo "$DISCORD_URL" > /opt/terraria/.discord_url
-       chmod 600 /opt/terraria/.discord_url
-       chown terraria:terraria /opt/terraria/.discord_url
-    fi
-
-    # Create the Launch Wrapper (handles notifications)
-    cat > /opt/terraria/launch.sh <<'LAUNCH'
-#!/bin/bash
-# Wrapper to run Terraria and handle Start/Stop notifications
-DIR="/opt/terraria"
-BIN="$DIR/TerrariaServer.bin.x86_64"
-CONF="$DIR/serverconfig.txt"
-URL_FILE="$DIR/.discord_url"
-
-# Simple Notification Function
-notify() {
-    [ ! -f "$URL_FILE" ] && return
-    local title="$1"
-    local color="$2" # integer
-    local desc="$3"
-    local url=$(cat "$URL_FILE")
-    [ -z "$url" ] && return
-    
-    # Try to get local IP
-    local ip=$(ip -4 a s eth0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1 || echo "Unknown")
-
-    # JSON Payload (minimal)
-    local json=$(cat <<J
-{
-  "embeds": [{
-    "title": "$title",
-    "description": "$desc",
-    "color": $color,
-    "fields": [
-      { "name": "Server IP", "value": "$ip", "inline": true }
-    ],
-    "footer": { "text": "Terraria Server Status" },
-    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  }]
-}
-J
-)
-    curl -s -H "Content-Type: application/json" -d "$json" "$url" >/dev/null || true
-}
-
-notify "Server Starting" 3447003 "Terraria Server is booting up..."
-
-# Run the Server
-"$BIN" -config "$CONF"
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -eq 0 ]; then
-    notify "Server Stopped" 15158332 "Server shut down normally."
-else
-    notify "Server Crashed" 15158332 "Server exited with error code $EXIT_CODE."
-fi
-
-exit $EXIT_CODE
-LAUNCH
-    chmod +x /opt/terraria/launch.sh
-    chown terraria:terraria /opt/terraria/launch.sh
-
     # Download
     ZIP_FILE="terraria-server.zip"
     URL="https://terraria.org/api/download/pc-dedicated-server/terraria-server-$TERRARIA_VERSION.zip"

@@ -24,11 +24,11 @@ FIELDS_JSON=""
 FOOTER="Terraria Proxmox Manager"
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
 
-# Icons (Publicly available icons)
-ICON_SUCCESS="https://i.imgur.com/Hco8h3b.png" # Green Check
-ICON_ERROR="https://i.imgur.com/ox2O27Q.png"   # Red X
-ICON_WARN="https://i.imgur.com/N7kF9pX.png"    # Yellow Warning
-ICON_INFO="https://i.imgur.com/S7W7e4w.png"    # Blue Info
+# Icons (Reliable Placeholders)
+ICON_SUCCESS="https://placehold.co/64x64/2ecc71/ffffff.png?text=OK"     # Green
+ICON_ERROR="https://placehold.co/64x64/e74c3c/ffffff.png?text=ERR"     # Red
+ICON_WARN="https://placehold.co/64x64/f1c40f/ffffff.png?text=WARN"     # Yellow
+ICON_INFO="https://placehold.co/64x64/3498db/ffffff.png?text=INFO"     # Blue
 THUMBNAIL=""
 
 # Escape JSON string function
