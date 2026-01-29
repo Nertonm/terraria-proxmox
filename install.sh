@@ -102,8 +102,8 @@ while [ "$#" -gt 0 ]; do
     --dhcp) NET_DHCP="yes"; shift ;;
     --ip) NET_IP="$2"; NET_DHCP="no"; shift 2 ;;
     --gw) NET_GW="$2"; shift 2 ;;
-    -p, --port) SERVER_PORT="$2"; shift 2 ;;
-    -m, --maxplayers) MAX_PLAYERS="$2"; shift 2 ;;
+    -p|--port) SERVER_PORT="$2"; shift 2 ;;
+    -m|--maxplayers) MAX_PLAYERS="$2"; shift 2 ;;
     --world-name) WORLD_NAME="$2"; shift 2 ;;
     --evil) WORLD_EVIL="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
