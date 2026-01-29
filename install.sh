@@ -539,14 +539,22 @@ pct exec "$CT_ID" -- env \
     if command -v apk >/dev/null 2>&1; then
         echo "Alpine detected."
         apk update
-        apk add --no-cache bash findutils icu-libs wget unzip tmux curl ca-certificates iproute2 python3 py3-pip
+        apk add --no-cache bash findutils icu-libs wget unzip tmux curl ca-certificates iproute2 python3 py3-pip procps
+        # Alpine uses musl, locales are different, usually handled by 'musl-locales' if needed, but often C.UTF-8 works.
     elif command -v apt-get >/dev/null 2>&1; then
       echo "Debian/Ubuntu detected."
       apt-get update
-      apt-get install -y wget unzip tmux libicu-dev supervisor curl ca-certificates iproute2 python3 python3-venv python3-pip findutils
+      apt-get install -y wget unzip tmux libicu-dev supervisor curl ca-certificates iproute2 python3 python3-venv python3-pip findutils locales procps
+
+      # Fix Locales
+      if [ -f /etc/locale.gen ]; then
+         sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+         locale-gen
+         update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+      fi
     elif command -v dnf >/dev/null 2>&1; then
         echo "Fedora/RHEL detected."
-        dnf install -y wget unzip tmux libicu curl ca-certificates iproute python3 python3-pip findutils
+        dnf install -y wget unzip tmux libicu curl ca-certificates iproute python3 python3-pip findutils procps
     else
         echo "Error: No supported package manager found (apk, apt, dnf)."
         exit 1
@@ -682,7 +690,6 @@ mkdir -p "$WORLD_DIR"
     if [ ! -f "$WORLD_PATH" ]; then
          notify "First Run" 3447003 "World file not found. Server will generate it automatically (this may take a minute)..."
     fi
-fi
 
 # Ensure Permissions (Critical fix for access denied errors)
 chown -R terraria:terraria "$DIR" "$(dirname "$WORLD_PATH")" 2>/dev/null || true
@@ -719,18 +726,15 @@ tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     BOT_PID=""
     if [ -f "$DIR/.bot_env" ] && [ -f "$DIR/discord_bot.py" ]; then
         echo "Starting Discord Bot..."
-        # Subshell to source env without polluting parent
-        (
-            source "$DIR/.bot_env"
-            # Run using venv python, piping log
-            nohup "$DIR/.bot_venv/bin/python3" "$DIR/discord_bot.py" > "$DIR/bot_output.log" 2>&1 &
-            echo $! > "$DIR/bot.pid"
-        )
-        # Read PID back (slightly hacky but works for subshell async)
-        sleep 1
-        if [ -f "$DIR/bot.pid" ]; then
-            BOT_PID=$(cat "$DIR/bot.pid")
-        fi
+        # Load env vars in current shell (wrapper)
+        set -a
+        . "$DIR/.bot_env"
+        set +a
+        
+        # Run in background directly
+        "$DIR/.bot_venv/bin/python3" "$DIR/discord_bot.py" > "$DIR/bot_output.log" 2>&1 &
+        BOT_PID=$!
+        echo "$BOT_PID" > "$DIR/bot.pid"
     fi
 
 # Setup Logging: Pipe the tmux output to the log file immediately

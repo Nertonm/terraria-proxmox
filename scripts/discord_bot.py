@@ -53,7 +53,7 @@ async def run_shell_async(command):
             stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
-        return stdout.decode().strip()
+        return stdout.decode(errors='replace').strip()
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -297,7 +297,7 @@ async def update_status_task():
             # Check if server is actually running
             pgrep = await run_shell_async("pgrep -f TerrariaServer")
             
-            if not pgrep or "1" not in str(pgrep) and len(str(pgrep)) < 2: # Basic check
+            if not pgrep or len(pgrep.strip()) == 0:
                 # Process not found
                 await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Servidor Offline"))
                 await asyncio.sleep(30) # Check less frequently if offline
@@ -456,7 +456,7 @@ async def send_status_embed(ctx):
         # Parallel Tasks
         ip_task = asyncio.create_task(get_public_ip())
         mem_task = asyncio.create_task(run_shell_async("free -m | grep Mem: | awk '{print $3\"MB / \"$2\"MB\"}'"))
-        uptime_task = asyncio.create_task(run_shell_async("uptime -p"))
+        uptime_task = asyncio.create_task(run_shell_async("uptime -p || uptime"))
         players_task = asyncio.create_task(run_shell_async("ss -tn state established '( sport = :7777 )' | grep -v Recv-Q | wc -l"))
         
         public_ip, mem, uptime, players = await asyncio.gather(ip_task, mem_task, uptime_task, players_task)
