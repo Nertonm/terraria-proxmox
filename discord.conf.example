@@ -1,4 +1,4 @@
-# Discord Webhook Configuration
-# Rename this file to 'discord.conf' and paste your Webhook URL below.
+# Renomeie este arquivo para 'discord.conf' na raiz do projeto.
+# Preencha a URL completa do webhook do Discord.
 
 DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN"

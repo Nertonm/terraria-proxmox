@@ -17,15 +17,21 @@ notify_backup() {
   local msg="$3"
   local file_path="${4:-}"
   
-  local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   if [ -x "$script_dir/discord_webhook.sh" ]; then
     local args=(--title "$title" --desc "$msg" --status "$status")
     
     if [ "$status" == "success" ] && [ -n "$file_path" ]; then
-      local size=$(du -h "$file_path" | cut -f1)
-      local filename=$(basename "$file_path")
-      local end_time=$(date +%s)
-      local duration=$((end_time - START_TIME))
+      local size
+      local filename
+      local end_time
+      local duration
+
+      size=$(du -h "$file_path" | cut -f1)
+      filename=$(basename "$file_path")
+      end_time=$(date +%s)
+      duration=$((end_time - START_TIME))
       
       args+=(--field "File:$filename")
       args+=(--field "Size:$size")
@@ -67,10 +73,18 @@ pct exec "$CT_ID" -- bash -c "systemctl start terraria || supervisorctl start te
 echo "Backup saved to: $OUT"
 
 # 4. Rotate Backups
-COUNT=$(ls -1 "$DEST_DIR"/terraria-${CT_ID}-*.tar.gz 2>/dev/null | wc -l)
+mapfile -t BACKUPS < <(
+  find "$DEST_DIR" -maxdepth 1 -type f -name "terraria-${CT_ID}-*.tar.gz" -printf '%T@ %p\n' \
+    | sort -rn \
+    | cut -d' ' -f2-
+)
+
+COUNT=${#BACKUPS[@]}
 if [ "$COUNT" -gt "$KEEP" ]; then
   echo "Rotating backups (keeping $KEEP)..."
-  ls -1t "$DEST_DIR"/terraria-${CT_ID}-*.tar.gz | tail -n +$((KEEP+1)) | xargs -r rm -f --
+  for old_backup in "${BACKUPS[@]:KEEP}"; do
+    rm -f -- "$old_backup"
+  done
 fi
 
 notify_backup "success" "Backup Complete" "The world backup was successfully completed and rotated." "$OUT"

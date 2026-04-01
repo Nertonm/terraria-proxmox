@@ -37,7 +37,7 @@ WORLD_EVIL=${WORLD_EVIL:-1}     # 1=Random, 2=Corrupt, 3=Crimson
 SEED=${SEED:-""}
 SECRET_SEED=${SECRET_SEED:-""}
 PASSWORD=${PASSWORD:-""}
-MOTD=${MOTD:-"Welcome explicitly"}
+MOTD=${MOTD:-"Welcome to Terraria Server"}
 SECURE=${SECURE:-0}
 AUTOCREATE=${AUTOCREATE:-0}
 PRIORITY=${PRIORITY:-1}
@@ -92,13 +92,13 @@ Options:
   --upnp                   Enable UPnP (default: off)
   --language LANG          Language (default: en-US)
   --banlist FILE           Banlist filename (default: banlist.txt)
-  --npcstream N            Reduce enemy skipping (default: 60)
+  --npcstream N            Reduce enemy skipping (Terraria default: 60)
   --journey-permission N   Journey Mode Defaults (0=Locked, 1=Host, 2=All)
-  --autocreate             Enable auto-creation of world if missing
+  --autocreate             Compatibility flag. Missing worlds are already auto-created.
   --world-file FILE        Import an existing .wld file
   --enable-backup          Enable automated backups
   --backup-schedule TYPE   Schedule: daily, hourly, 6h, weekly, or "cron expr" (def: daily)
-  --enable-monitor         Enable resource monitoring (RAM usage > 90%)
+  --enable-monitor         Enable resource monitoring (RAM and disk alerts)
   --discord-url URL        Configure Discord Webhook URL (Notifications)
   --enable-bot             Enable Discord Commander Bot
   --bot-token TOKEN        Discord Bot Token
@@ -315,14 +315,16 @@ notify_install() {
   local status="$1"
   local title="$2"
   local msg="$3"
-  local script_dir="$(dirname "$0")"
+  local script_dir
+  script_dir="$(dirname "$0")"
   
   if [ -x "$script_dir/scripts/discord_webhook.sh" ] && [ -n "${DISCORD_URL:-}" ]; then
     local args=(--title "$title" --desc "$msg" --status "$status" --url "$DISCORD_URL")
     args+=(--field "CT ID:$CT_ID")
     
     # Try to get IP
-    local ip=$(pct exec "$CT_ID" -- ip -4 a s eth0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1 || echo "Unknown")
+    local ip
+    ip=$(pct exec "$CT_ID" -- ip -4 a s eth0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1 || echo "Unknown")
     args+=(--field "Server Address:$ip")
     
     "$script_dir/scripts/discord_webhook.sh" "${args[@]}" || true
@@ -989,7 +991,7 @@ secure=$SECURE
 
 #Sets the server language from its language code.
 #English = en-US, German = de-DE, Italian = it-IT, French = fr-FR, Spanish = es-ES, Russian = ru-RU, Chinese = zh-Hans, Portuguese = pt-BR, Polish = pl-PL,
-language=en-US
+language=$LANGUAGE
 
 #Automatically forward ports with uPNP
 upnp=$UPNP

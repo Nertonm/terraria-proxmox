@@ -6,6 +6,7 @@ import re
 import aiohttp
 import datetime
 import shutil
+import shlex
 from discord.ext import commands
 
 # --- CONFIGURATION (INTERNAL) ---
@@ -20,7 +21,6 @@ CT_ID = os.getenv('CT_ID')
 HAS_PCT = shutil.which('pct') is not None
 SERVER_DIR = "/opt/terraria"
 LOG_FILE = f"{SERVER_DIR}/server_output.log"
-CONFIG_FILE = f"{SERVER_DIR}/serverconfig.txt"
 CONFIG_FILE = f"{SERVER_DIR}/serverconfig.txt"
 CHANNEL_ID_FILE = f"{SERVER_DIR}/.discord_channel_id"
 
@@ -39,11 +39,9 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 bot.remove_command('help') # Remove default help to use custom one
 
 async def run_shell_async(command):
-    # ... (unchanged) ...
     try:
         if CT_ID and HAS_PCT:
-            safe_command = command.replace("'", "'\\''")
-            full_command = f"pct exec {CT_ID} -- bash -c '{safe_command}'"
+            full_command = f"pct exec {CT_ID} -- bash -c {shlex.quote(command)}"
         else:
             full_command = command
 
@@ -53,9 +51,19 @@ async def run_shell_async(command):
             stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
-        return stdout.decode(errors='replace').strip()
+        stdout_text = stdout.decode(errors='replace').strip()
+        stderr_text = stderr.decode(errors='replace').strip()
+
+        if process.returncode != 0:
+            return stderr_text or stdout_text or f"Command failed with exit code {process.returncode}"
+
+        return stdout_text
     except Exception as e:
         return f"Error: {str(e)}"
+
+
+def build_tmux_command(command_text):
+    return f"tmux send-keys -t terraria {shlex.quote(command_text)} Enter"
 
 
 async def get_public_ip():
@@ -89,6 +97,22 @@ async def get_server_info():
         print(f"Error parsing serverconfig: {e}")
         
     return info
+
+
+async def get_player_count(port):
+    if not re.fullmatch(r"\d+", str(port or "")):
+        port = "7777"
+
+    result = await run_shell_async(
+        "if command -v ss >/dev/null 2>&1; then "
+        f"ss -tn state established '( sport = :{port} )' | grep -v Recv-Q | wc -l; "
+        "elif command -v netstat >/dev/null 2>&1; then "
+        f"netstat -tn | grep ':{port}' | grep ESTABLISHED | wc -l; "
+        "else echo 0; fi"
+    )
+
+    count = result.strip()
+    return count if re.fullmatch(r"\d+", count) else "0"
 
 
 
@@ -129,7 +153,8 @@ LOG_CHANNEL_ID = None
 @bot.event
 async def on_message(message):
     # Avoid bot self-loops
-    if message.author.bot: return
+    if message.author.bot:
+        return
     
     # Process Commands first
     await bot.process_commands(message)
@@ -138,16 +163,15 @@ async def on_message(message):
     # Only if channel checks out and it's not a command
     if LOG_CHANNEL_ID and message.channel.id == LOG_CHANNEL_ID:
         if not message.content.startswith(bot.command_prefix):
-             # Sanitize message to prevent shell/tmux injection
-             clean_msg = message.content.replace("'", "").replace('"', "")
-             # Limit length
-             if len(clean_msg) > 100: clean_msg = clean_msg[:100] + "..."
+             clean_msg = message.content.replace("\n", " ").replace("\r", " ").strip()
+             if len(clean_msg) > 100:
+                 clean_msg = clean_msg[:100] + "..."
              
              user = message.author.display_name
              # Send to Terraria Console via 'say'
              # Format: say [Discord] <User>: Message
              cmd = f"say [Discord] <{user}>: {clean_msg}"
-             full_cmd = f"tmux send-keys -t terraria '{cmd}' Enter"
+             full_cmd = build_tmux_command(cmd)
              
              # Fire and forget (don't wait for output to keep chat snappy)
              asyncio.create_task(run_shell_async(full_cmd))
@@ -303,9 +327,8 @@ async def update_status_task():
                 await asyncio.sleep(30) # Check less frequently if offline
                 continue
 
-            # Get Player Count
-            res = await run_shell_async("ss -tn state established '( sport = :7777 )' | grep -v Recv-Q | wc -l")
-            count = res.strip() or "0"
+            server_info = await get_server_info()
+            count = await get_player_count(server_info["port"])
             
             activity_text = f"Terraria com {count} jogadores"
             await bot.change_presence(activity=discord.Game(name=activity_text))
@@ -340,25 +363,19 @@ async def ban(ctx, player: str, *, reason: str = "Sem motivo"):
 @bot.command(aliases=['exec', 'cmd'])
 async def command(ctx, *, cmd_text: str):
     """Sends a raw command to the server console."""
-    if not await is_authorized(ctx): return
+    if not await is_authorized(ctx):
+        return
     
     # Sanitize inputs (Basic check to avoid breakout, though tmux send-keys is relatively safe as it types text)
-    if any(c in cmd_text for c in [';', '&&', '`']):
+    if any(c in cmd_text for c in [";", "&&", "`", "\n", "\r"]):
         await ctx.send("⚠️ **Unsafe characters detected.** Command blocked.")
         return
 
     # tmux send-keys logic
     # We send the command + Enter
-    full_cmd = f"tmux send-keys -t terraria '{cmd_text}' Enter"
+    full_cmd = build_tmux_command(cmd_text)
     
     async with ctx.typing():
-        # Capture current log size
-        log_size_before = 0
-        if os.path.exists(LOG_FILE):
-             try:
-                 log_size_before = os.path.getsize(LOG_FILE)
-             except: pass
-
         res = await run_shell_async(full_cmd)
         
         if res:
@@ -374,9 +391,10 @@ async def command(ctx, *, cmd_text: str):
              # or just show last few lines. Suffixing command with unique ID is hard in tmux.
              # We will show the last 6 lines.
              logs = await run_shell_async(f"tail -n 6 {LOG_FILE}")
-             if not logs: logs = "(No output captured)"
+             if not logs:
+                 logs = "(No output captured)"
              await ctx.send(f"✅ **Enviado:** `{cmd_text}`\n**Console Output:**\n```bash\n{logs}\n```")
-        except:
+        except Exception:
              await ctx.send(f"✅ **Enviado:** `{cmd_text}` (Logs indisponíveis)")
 
 @bot.command()
@@ -457,10 +475,12 @@ async def send_status_embed(ctx):
         ip_task = asyncio.create_task(get_public_ip())
         mem_task = asyncio.create_task(run_shell_async("free -m | grep Mem: | awk '{print $3\"MB / \"$2\"MB\"}'"))
         uptime_task = asyncio.create_task(run_shell_async("uptime -p || uptime"))
-        players_task = asyncio.create_task(run_shell_async("ss -tn state established '( sport = :7777 )' | grep -v Recv-Q | wc -l"))
+        server_info_task = asyncio.create_task(get_server_info())
         
-        public_ip, mem, uptime, players = await asyncio.gather(ip_task, mem_task, uptime_task, players_task)
-        server_info = await get_server_info()
+        public_ip, mem, uptime, server_info = await asyncio.gather(
+            ip_task, mem_task, uptime_task, server_info_task
+        )
+        players = await get_player_count(server_info["port"])
         
         # Determine Status
         status_color = discord.Color.green()
@@ -599,11 +619,11 @@ async def restart(ctx):
     await wait_and_verify(ctx, "Restart", verify_running=True)
 
 # Graceful Shutdown
-async def shutdown():
+async def shutdown_bot():
     await bot.close()
 
 def handle_sigterm(*args):
-    asyncio.create_task(shutdown())
+    asyncio.create_task(shutdown_bot())
 
 signal.signal(signal.SIGTERM, handle_sigterm)
 
@@ -698,17 +718,17 @@ async def reboot(ctx, minutes: int = 5):
         # Notify in-game
         msg = f"say [Server] Reiniciando em {i} minuto(s)... Salve seus itens!"
         if i == 1:
-             msg = f"say [Server] Reiniciando em 60 segundos! AVISO FINAL!"
+             msg = "say [Server] Reiniciando em 60 segundos! AVISO FINAL!"
              
-        await run_shell_async(f"tmux send-keys -t terraria '{msg}' Enter")
+        await run_shell_async(build_tmux_command(msg))
         
         # Wait 60s (unless it's the last minute, handle differently if we wanted seconds logic)
         if i > 0:
              await asyncio.sleep(60)
 
     # Final Save
-    await run_shell_async("tmux send-keys -t terraria 'say [Server] Salvando mundo...' Enter")
-    await run_shell_async("tmux send-keys -t terraria 'save' Enter")
+    await run_shell_async(build_tmux_command("say [Server] Salvando mundo..."))
+    await run_shell_async(build_tmux_command("save"))
     await asyncio.sleep(2)
     
     await ctx.send("🔄 **Reiniciando agora...**")
@@ -716,4 +736,6 @@ async def reboot(ctx, minutes: int = 5):
     await wait_and_verify(ctx, "Restart", verify_running=True)
 
 if __name__ == "__main__":
+    if not TOKEN:
+        raise SystemExit("DISCORD_BOT_TOKEN is not set")
     bot.run(TOKEN)

@@ -14,7 +14,7 @@ THRESHOLD=${3:-90}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 send_discord() {
-  local args=($@)
+  local args=("$@")
   if [ -x "$SCRIPT_DIR/discord_webhook.sh" ]; then
     "$SCRIPT_DIR/discord_webhook.sh" "${args[@]}" || true
   fi
@@ -50,9 +50,15 @@ DISK_FREE=$(echo "$DISK_INFO" | awk '{print $4}')
 # Uptime
 UPTIME_PRETTY=$(pct exec "$CT_ID" -- uptime -p | sed 's/up //')
 
-# Active Players (Count ESTABLISHED connections on port 7777)
-# Requires 'ss' or 'netstat' inside container.
-PLAYER_COUNT=$(pct exec "$CT_ID" -- sh -c "ss -tn state established '( sport = :7777 )' | grep -v Recv-Q | wc -l || netstat -tn | grep :7777 | grep ESTABLISHED | wc -l || echo 0")
+# Active Players
+# Read the configured port from serverconfig when possible, then count ESTABLISHED
+# connections on that port.
+SERVER_PORT=$(pct exec "$CT_ID" -- awk -F= "\$1==\"port\" {print \$2; exit}" /opt/terraria/serverconfig.txt 2>/dev/null | tr -d '\r')
+if [[ ! "$SERVER_PORT" =~ ^[0-9]+$ ]]; then
+  SERVER_PORT=7777
+fi
+
+PLAYER_COUNT=$(pct exec "$CT_ID" -- sh -c "if command -v ss >/dev/null 2>&1; then ss -tn state established '( sport = :$SERVER_PORT )' | grep -v Recv-Q | wc -l; elif command -v netstat >/dev/null 2>&1; then netstat -tn | grep ':$SERVER_PORT' | grep ESTABLISHED | wc -l; else echo 0; fi")
 PLAYER_COUNT=$((PLAYER_COUNT)) # force integer
 
 # 3. Logic: Alert Mode

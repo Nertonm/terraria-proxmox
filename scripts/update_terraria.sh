@@ -13,7 +13,8 @@ notify_update() {
   local title="$2"
   local msg="$3"
   
-  local script_dir="$(dirname "$0")"
+  local script_dir
+  script_dir="$(dirname "$0")"
   if [ -x "$script_dir/discord_webhook.sh" ]; then
     "$script_dir/discord_webhook.sh" \
       --title "$title" \
